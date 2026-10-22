@@ -359,7 +359,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <span class="lbl">Map format</span>
           <select id="format">
             <option value="v2" selected>Classic (v2, widest support)</option>
-            <option value="v4">Modern (v4, with learned light show)</option>
+            <option value="v4">Modern (v4)</option>
+          </select>
+        </label>
+        <label>
+          <span class="lbl">Lights (Modern v4 only)</span>
+          <select id="lightenv">
+            <option value="classic" selected>Classic lights, shows in ChroMapper (The First environment)</option>
+            <option value="groups">Learned light groups (Collider environment, game only)</option>
           </select>
         </label>
       </div>
@@ -1512,7 +1519,8 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
     const events = map.events.map(function (e) {
       return { _time: r6(e.time), _type: e.type, _value: e.value, _floatValue: e.float === undefined ? 1 : e.float };
     });
-    return { _version: '2.0.0', _events: events, _notes: notes, _obstacles: walls };
+    events.sort(function (a, b) { return a._time - b._time || a._type - b._type; });
+    return { _version: '2.0.0', _events: events, _notes: notes, _obstacles: walls, _waypoints: [], _specialEventsKeywordFilters: { _keywords: [] } };
   }
   ns.toV2 = toV2;
 
@@ -1848,7 +1856,7 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
         })
       };
     });
-    const basic = (ls.basic || []).map(function (e) { return { b: r6(e.time), i: basicData.add({ t: e.t, i: e.i, f: e.f }) }; });
+    const basic = (ls.basic || []).slice().sort(function (a, b) { return a.time - b.time || a.t - b.t; }).map(function (e) { return { b: r6(e.time), i: basicData.add({ t: e.t, i: e.i, f: e.f }) }; });
     const boosts = (ls.boosts || []).map(function (e) { return { b: r6(e.time), i: boostData.add({ b: e.on ? 1 : 0 }) }; });
     return {
       version: '4.0.0',
@@ -4258,7 +4266,16 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
     for (const n of names) files.push({ name: n + 'Standard.dat', data: ns.textToBytes(JSON.stringify(ns.toV4(o.maps[n]))) });
     // one lightshow serves every difficulty; it is composed once per song
     let lights = { groups: [], boosts: [], basic: [] };
-    for (const n of names) if (o.maps[n].lights4) { lights = o.maps[n].lights4; break; }
+    if (o.lightMode === 'classic') {
+      // classic light events (rings, lasers, back lights...) in the lightshow's basic-event list: the original
+      // environment and ChroMapper both draw these; the learned light-group show needs the Collider environment
+      for (const n of names) {
+        const ev = o.maps[n].events || [];
+        if (ev.length) { lights.basic = ev.map(function (e) { return { time: e.time, t: e.type, i: e.value, f: e.float === undefined ? 1 : e.float }; }); break; }
+      }
+    } else {
+      for (const n of names) if (o.maps[n].lights4) { lights = o.maps[n].lights4; break; }
+    }
     files.push({ name: 'Lightshow.dat', data: ns.textToBytes(JSON.stringify(ns.buildLightshow4(lights))) });
     if (o.cover) files.push({ name: 'cover.jpg', data: o.cover });
     if (o.audio) files.push({ name: songFile, data: o.audio });
@@ -5008,10 +5025,10 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
       var count = song ? song.count : (S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * rate)) + Math.round(lead * S.an.period * rate);
       var zip = fmt === 'v4'
         ? BSM.buildMapZip({
-            format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg',
+            format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg', lightMode: $('lightenv').value,
             sampleCount: count,
             frequency: rate,
-            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration + lead * S.an.period }
+            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration + lead * S.an.period, environment: $('lightenv').value === 'classic' ? 'DefaultEnvironment' : 'ColliderEnvironment' }
           })
         : BSM.buildMapZip({ info: info, maps: maps, audio: audio, cover: cover });
       if (!audio) log('song.ogg is not in the zip. Add it to the folder before loading the map in game.', 'warn');

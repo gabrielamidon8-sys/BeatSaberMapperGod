@@ -359,7 +359,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <span class="lbl">Map format</span>
           <select id="format">
             <option value="v2" selected>Classic (v2, widest support)</option>
-            <option value="v4">Modern (v4, with learned light show)</option>
+            <option value="v4">Modern (v4)</option>
+          </select>
+        </label>
+        <label>
+          <span class="lbl">Lights (Modern v4 only)</span>
+          <select id="lightenv">
+            <option value="classic" selected>Classic lights, shows in ChroMapper (The First environment)</option>
+            <option value="groups">Learned light groups (Collider environment, game only)</option>
           </select>
         </label>
       </div>
@@ -776,10 +783,10 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       var count = song ? song.count : (S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * rate)) + Math.round(lead * S.an.period * rate);
       var zip = fmt === 'v4'
         ? BSM.buildMapZip({
-            format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg',
+            format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg', lightMode: $('lightenv').value,
             sampleCount: count,
             frequency: rate,
-            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration + lead * S.an.period }
+            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration + lead * S.an.period, environment: $('lightenv').value === 'classic' ? 'DefaultEnvironment' : 'ColliderEnvironment' }
           })
         : BSM.buildMapZip({ info: info, maps: maps, audio: audio, cover: cover });
       if (!audio) log('song.ogg is not in the zip. Add it to the folder before loading the map in game.', 'warn');

@@ -117,7 +117,8 @@
     const events = map.events.map(function (e) {
       return { _time: r6(e.time), _type: e.type, _value: e.value, _floatValue: e.float === undefined ? 1 : e.float };
     });
-    return { _version: '2.0.0', _events: events, _notes: notes, _obstacles: walls };
+    events.sort(function (a, b) { return a._time - b._time || a._type - b._type; });
+    return { _version: '2.0.0', _events: events, _notes: notes, _obstacles: walls, _waypoints: [], _specialEventsKeywordFilters: { _keywords: [] } };
   }
   ns.toV2 = toV2;
 

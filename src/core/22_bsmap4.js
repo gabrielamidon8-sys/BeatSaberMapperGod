@@ -151,7 +151,7 @@
         })
       };
     });
-    const basic = (ls.basic || []).map(function (e) { return { b: r6(e.time), i: basicData.add({ t: e.t, i: e.i, f: e.f }) }; });
+    const basic = (ls.basic || []).slice().sort(function (a, b) { return a.time - b.time || a.t - b.t; }).map(function (e) { return { b: r6(e.time), i: basicData.add({ t: e.t, i: e.i, f: e.f }) }; });
     const boosts = (ls.boosts || []).map(function (e) { return { b: r6(e.time), i: boostData.add({ b: e.on ? 1 : 0 }) }; });
     return {
       version: '4.0.0',

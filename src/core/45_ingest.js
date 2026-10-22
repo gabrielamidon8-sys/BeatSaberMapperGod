@@ -96,7 +96,16 @@
     for (const n of names) files.push({ name: n + 'Standard.dat', data: ns.textToBytes(JSON.stringify(ns.toV4(o.maps[n]))) });
     // one lightshow serves every difficulty; it is composed once per song
     let lights = { groups: [], boosts: [], basic: [] };
-    for (const n of names) if (o.maps[n].lights4) { lights = o.maps[n].lights4; break; }
+    if (o.lightMode === 'classic') {
+      // classic light events (rings, lasers, back lights...) in the lightshow's basic-event list: the original
+      // environment and ChroMapper both draw these; the learned light-group show needs the Collider environment
+      for (const n of names) {
+        const ev = o.maps[n].events || [];
+        if (ev.length) { lights.basic = ev.map(function (e) { return { time: e.time, t: e.type, i: e.value, f: e.float === undefined ? 1 : e.float }; }); break; }
+      }
+    } else {
+      for (const n of names) if (o.maps[n].lights4) { lights = o.maps[n].lights4; break; }
+    }
     files.push({ name: 'Lightshow.dat', data: ns.textToBytes(JSON.stringify(ns.buildLightshow4(lights))) });
     if (o.cover) files.push({ name: 'cover.jpg', data: o.cover });
     if (o.audio) files.push({ name: songFile, data: o.audio });
