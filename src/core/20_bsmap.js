@@ -238,7 +238,8 @@
     if (!beats) return map;
     const mv = function (o) { return Object.assign({}, o, { time: o.time + beats }); };
     const out = Object.assign({}, map, {
-      notes: map.notes.map(mv), bombs: map.bombs.map(mv), walls: map.walls.map(mv), events: map.events.map(mv)
+      notes: map.notes.map(mv), bombs: map.bombs.map(mv), walls: map.walls.map(mv), events: map.events.map(mv),
+      chains: (map.chains || []).map(function (c) { return Object.assign({}, c, { time: c.time + beats, tailTime: c.tailTime + beats }); })
     });
     if (map.lights4) {
       out.lights4 = {

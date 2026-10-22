@@ -78,7 +78,23 @@
     { name: 'cross-answer', lo: 3, m: [[0, [[0, 1, 1, 4]]], [0.5, [[1, 2, 1, 7]]], [1, [[0, 1, 1, 6]]], [1.5, [[1, 2, 1, 5]]]] },
     { name: 'box-red',      lo: 3, m: [[0, [[0, 0, 1, 0]]], [0.5, [[1, 3, 1, 1]]], [1, [[0, 1, 1, 1]]], [1.5, [[1, 2, 1, 0]]]] },
     { name: 'down-up-jump', lo: 3, m: [[0, [[0, 0, 0, 1]]], [0.5, [[1, 3, 0, 1]]], [1, [[0, 0, 2, 0]]], [1.5, [[1, 3, 2, 0]]]] },
-    { name: 'inward-roll',  lo: 3, m: [[0, [[0, 1, 1, 3]]], [0.5, [[1, 2, 1, 2]]], [1, [[0, 1, 0, 7]]], [1.5, [[1, 2, 0, 6]]]] }
+    { name: 'inward-roll',  lo: 3, m: [[0, [[0, 1, 1, 3]]], [0.5, [[1, 2, 1, 2]]], [1, [[0, 1, 0, 7]]], [1.5, [[1, 2, 0, 6]]]] },
+    // rising two-lane wave: both hands swing down, then up, one row higher each time
+    { name: 'wave-four',    lo: 3, m: [[0, [[0, 1, 0, 1]]], [0.5, [[1, 2, 0, 1]]], [1, [[0, 1, 1, 0]]], [1.5, [[1, 2, 1, 0]]]] },
+    // double staircase: both hands climb the outer lanes, alternating diagonals
+    { name: 'stair-doubles', lo: 3, m: [[0, [[0, 0, 0, 6], [1, 3, 0, 7]]], [0.5, [[0, 0, 1, 4], [1, 3, 1, 5]]], [1, [[0, 0, 2, 6], [1, 3, 2, 7]]]] },
+    // a diamond: top pair, then the sides answer
+    { name: 'diamond',      lo: 3, m: [[0, [[0, 1, 2, 1]]], [0.5, [[1, 2, 2, 1]]], [1, [[0, 0, 1, 5]]], [1.5, [[1, 3, 1, 4]]]] },
+    // slam: doubles at the bottom corners, up to the top corners, then the centre
+    { name: 'jump-slam',    lo: 4, m: [[0, [[0, 0, 0, 1], [1, 3, 0, 1]]], [1, [[0, 0, 2, 0], [1, 3, 2, 0]]], [2, [[0, 1, 0, 1], [1, 2, 0, 1]]]] },
+    // climbing ladder of alternating diagonals
+    { name: 'ladder',       lo: 3, m: [[0, [[0, 0, 0, 5]]], [0.5, [[1, 3, 0, 4]]], [1, [[0, 1, 1, 6]]], [1.5, [[1, 2, 1, 7]]], [2, [[0, 0, 2, 4]]], [2.5, [[1, 3, 2, 5]]]] },
+    // squeeze: both hands swing inward, then open back out
+    { name: 'squeeze',      lo: 3, m: [[0, [[0, 0, 1, 3]]], [0.5, [[1, 3, 1, 2]]], [1, [[0, 1, 1, 2]]], [1.5, [[1, 2, 1, 3]]]] },
+    // corner cross: opposite corners trade down and up swings
+    { name: 'corner-cross', lo: 3, m: [[0, [[0, 0, 2, 1]]], [0.5, [[1, 3, 0, 0]]], [1, [[0, 0, 1, 0]]], [1.5, [[1, 3, 1, 1]]]] },
+    // quick answer pairs, a quarter beat apart
+    { name: 'burst-answer', lo: 4, m: [[0, [[0, 1, 1, 1]]], [0.25, [[1, 2, 1, 1]]], [0.5, [[0, 1, 2, 0]]], [0.75, [[1, 2, 2, 0]]]] }
   ];
   ns.BUILTIN_COMBOS = BUILTIN_COMBOS;
 

@@ -115,12 +115,18 @@
         : (w.type === 1 ? { x: w.lane, y: 2, d: r6(w.dur), w: w.width, h: 3 } : { x: w.lane, y: 0, d: r6(w.dur), w: w.width, h: 5 });
       return { b: r6(w.time), r: 0, i: od.add(row) };
     });
+    const cd = Table();
+    const chains = (map.chains || []).map(function (c) {
+      return { hb: r6(c.time), hr: 0, tb: r6(c.tailTime), tr: 0,
+        i: nd.add({ x: c.lane, y: c.layer, c: c.color, d: c.dir, a: 0 }),
+        ci: cd.add({ tx: c.tx, ty: c.ty, c: c.slices, s: c.squish }) };
+    });
     return {
       version: '4.1.0',
       colorNotes: notes, colorNotesData: nd.items,
       bombNotes: bombs, bombNotesData: bd.items,
       arcs: [], arcsData: [],
-      chains: [], chainsData: [],
+      chains: chains, chainsData: cd.items,
       obstacles: walls, obstaclesData: od.items,
       njsEvents: [], njsEventData: []
     };

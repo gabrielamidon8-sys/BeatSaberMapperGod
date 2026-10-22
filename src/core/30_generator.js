@@ -263,14 +263,42 @@
 
   // ---------- hits (rhythm) ----------
   // Expected notes per beat, shaped by loudness and scaled so the song averages the target rate.
+  /* The song's dramatic shape: how hard each beat should push, and where the big moments are.
+   *   quiet sections breathe (fewer notes), loud ones push; the bars before a drop climb; the drop opens at full
+   *   force. Returns { mul, drops: [beat index], bounds: [beat index of every section change] }. */
+  function arcPlan(an, cfg) {
+    if (an._arc && an._arcC === cfg.contrast) return an._arc;
+    const K = an.beatCount, c = cfg.contrast === undefined ? 1 : cfg.contrast;
+    const mul = new Float64Array(K).fill(1);
+    const drops = [], bounds = [];
+    an.sections.forEach(function (sec, i) {
+      const lvl = sec.level === 'low' ? 0.68 : sec.level === 'high' ? 1.18 : 1;
+      for (let k = sec.start; k < sec.end && k < K; k++) mul[k] = lvl;
+      if (i > 0) bounds.push(sec.start);
+      if (sec.drop) {
+        drops.push(sec.start);
+        for (let j = 0; j < 16 && sec.start + j < K && sec.start + j < sec.end; j++) mul[sec.start + j] = Math.max(mul[sec.start + j], j < 8 ? 1.4 : 1.2);
+      }
+    });
+    for (const b of (ns.analyzeMood ? ns.analyzeMood(an).builds : [])) {      // the climb into a drop
+      const len = Math.max(1, b.end - b.start);
+      for (let k = b.start; k < b.end && k < K; k++) mul[k] *= 0.9 + 0.5 * ((k - b.start + 1) / len);
+    }
+    for (let k = 0; k < K; k++) mul[k] = 1 + (mul[k] - 1) * c;
+    an._arc = { mul: mul, drops: drops, bounds: bounds };
+    an._arcC = cfg.contrast;
+    return an._arc;
+  }
+
   function planTargets(an, cfg, pri) {
     const K = an.beatCount;
     const per = new Float64Array(K);
+    const arc = arcPlan(an, cfg);
     let sum = 0, n = 0;
     for (let k = 0; k < K; k++) {
       const e = an.beatEnergy[k];
       if (e < 0.04) continue;
-      per[k] = pri.densityMul(e); sum += per[k]; n++;
+      per[k] = pri.densityMul(e) * arc.mul[k]; sum += per[k]; n++;
     }
     const mean = n ? sum / n : 1;
     let total = 0;
@@ -285,6 +313,7 @@
     const grid = gridSlots(cfg.grid);
     const targets = cfg.plan || planTargets(an, cfg, pri);
     const hitTotal = targets.total / (1 + cfg.chord);
+    const arc = arcPlan(an, cfg);
 
     const onPer = new Array(K).fill(0);
     if (an.onsetTimes) for (let i = 0; i < an.onsetTimes.length; i++) {
@@ -317,7 +346,7 @@
     const dense = new Array(K).fill(false);                // machine-gun beats: the music itself hits every quarter
     if (follow > 0) {
       for (let k = 0; k < K; k++) {
-        if (onQ[k] >= 3 && an.beatEnergy[k] >= 0.15 && 4 / P <= 16) dense[k] = true;
+        if (onQ[k] >= 3 && an.beatEnergy[k] >= 0.15 && 4 / P <= 16 && arc.mul[k] >= 0.8) dense[k] = true;
         if (onE[k] >= 6 && onQ[k] >= 3 && an.beatEnergy[k] >= 0.15 && 8 / P <= maxStream) sp[k] = 8;
       }
     }
@@ -353,6 +382,22 @@
         for (const k of sb) { if (S <= limit()) break; stream[k] = false; S -= sp[k]; }
       }
     }
+    // Transitions: a quick roll into every section change; before a drop the roll is followed by a beat of silence.
+    const DIDX = { Easy: 0, Normal: 1, Hard: 2, Expert: 3, ExpertPlus: 4 };
+    const dI = DIDX[cfg.difficulty];
+    const dropSet = new Set(arc.drops);
+    let nFills = 0;
+    if (cfg.trans > 0 && dI >= 3 && spBase / P <= maxStream) {
+      for (const kb of arc.bounds) {
+        const isD = dropSet.has(kb);
+        const ks = isD ? [kb - 3, kb - 2] : (an.sections.some(function (sc) { return sc.start === kb && sc.level === 'high'; }) ? [kb - 2, kb - 1] : [kb - 1]);
+        for (const k of ks) {
+          if (k < 0 || k >= K || an.beatEnergy[k] < 0.12 || stream[k]) continue;
+          if (rng() < Math.min(1, 0.85 * cfg.trans)) { stream[k] = true; nFills++; }
+        }
+      }
+    }
+
     // A beat holds about as many hits as the music has onsets in it (real maps do this), never many more.
     const hasOnsets = !!an.onsetTimes;
     const capOf = function (k) { return hasOnsets ? onPer[k] + (onPer[k] >= 3 ? 1 : 0.35) : Infinity; };
@@ -431,7 +476,7 @@
         if (an.beatEnergy[k] < 0.0005 && onPer[k] === 0) continue;
         for (const s of (hard ? [0, 12, 6, 18] : [0, 12])) {
           const bs = (A + (k + s / SLOTS) * P) / P;
-          if (ns.onsetAt(an, A + (k + s / SLOTS) * P, 0.025) < thr + (s % 12 ? 0.12 : 0)) continue;
+          if (ns.onsetAt(an, A + (k + s / SLOTS) * P, 0.025) < (thr + (s % 12 ? 0.12 : 0)) * Math.pow(1 / arc.mul[k], 0.9)) continue;   // quiet parts keep only the clear hits
           while (lo < hits.length && hits[lo].bs < bs - 1.2) lo++;
           let ok = true, local = 0;
           for (let j = lo; j < hits.length && hits[j].bs <= bs + 1.2; j++) {
@@ -448,6 +493,29 @@
       }
       if (add.length) { for (const a of add) hits.push(a); hits.sort(function (a, b) { return a.bs - b.bs; }); }
     }
+    // the beat of silence before a drop (one pickup note stays), and a crash note on the first beat of every section
+    let nCrash = 0;
+    if (cfg.trans > 0 && dI >= 2) {
+      for (const kb of arc.bounds) {
+        const bsK = (A + kb * P) / P;
+        if (dropSet.has(kb) && dI >= 3 && rng() < Math.min(1, 0.9 * cfg.trans)) {
+          const from = bsK - 1 + 0.25;
+          for (let j = hits.length - 1; j >= 0; j--) if (hits[j].bs > from && hits[j].bs < bsK - 1e-6) hits.splice(j, 1);
+        }
+        let ci = -1;
+        for (let j = 0; j < hits.length; j++) if (hits[j].k === kb && hits[j].s === 0) { ci = j; break; }
+        if (ci < 0 && (dropSet.has(kb) || an.beatEnergy[kb] > 0.5)) {
+          const prev = hits.filter(function (x) { return x.bs < bsK; }).pop();
+          if (!prev || bsK - prev.bs >= cfg.minGap - 1e-6) {
+            hits.push({ k: kb, s: 0, bs: bsK, strength: 1, e: an.beatEnergy[kb], down: true, stream: false });
+            hits.sort(function (a, b) { return a.bs - b.bs; });
+            ci = hits.findIndex(function (x) { return x.bs === bsK; });
+          }
+        }
+        if (ci >= 0 && !hits[ci].stream) { hits[ci].crash = dropSet.has(kb) ? 2 : 1; nCrash++; }
+      }
+    }
+    hits.fills = nFills; hits.crashes = nCrash;
     if (an.instEnv) {
       for (const h of hits) {
         const r = ns.instAt(an, h.bs * P, 0.03);
@@ -586,7 +654,7 @@
     const pMotif = diffIdx >= 3 ? ns.clamp(0.16 * T * T, 0, 0.8) : (diffIdx === 2 ? ns.clamp(0.07 * T * T, 0, 0.4) : 0);
     const secStart = new Map();
     for (const sc of an.sections) secStart.set(sc.start, sc);
-    let lastHand = 1;
+    let lastHand = 1, builtUsed = 0;
     const transform = function (m, mir, shift) {
       const mm = mir ? ns.mirrorMotif(m) : m;
       return mm.map(function (mo) { return [mo[0], mo[1].map(function (n) { return [n[0], n[1] + shift, n[2], n[3]]; })]; });
@@ -640,13 +708,13 @@
         if (ok) cand.push(m);
       }
       for (let tries = 0; tries < 5 && cand.length; tries++) {
-        const w = cand.map(function (m) { return (0.4 + Math.sqrt(m.n)) * Math.exp((m.t - 0.35) * 2.4 * (T - 0.6)); });
+        const w = cand.map(function (m) { return (m.built ? 3 : 1) * (0.4 + Math.sqrt(m.n)) * Math.exp((m.t - 0.35) * 2.4 * (T - 0.6)); });
         const i = rng.weighted(w);
         const m = cand.splice(i, 1)[0];
         const mir = rng() < 0.5;
         for (const shift of [0, rng() < 0.5 ? 1 : -1, 0]) {
           const moments = transform(m.m, mir, shift);
-          if (dryRun(moments, hi)) { commit(moments, hi); return m.m.length; }
+          if (dryRun(moments, hi)) { commit(moments, hi); if (m.built) builtUsed++; return m.m.length; }
         }
       }
       return 0;
@@ -656,12 +724,13 @@
       if (h.stream || !lib.combos.length || cfg.combo <= 0 || diffIdx < 2) return false;
       let p = 0;
       const sec = secStart.get(h.k);
-      if (sec && h.s === 0 && h.e > 0.4) p = sec.drop ? 0.7 : 0.3;
+      if (h.crash) p = h.crash === 2 ? 1 : 0.6;
+      else if (sec && h.s === 0 && h.e > 0.4) p = sec.drop ? 0.7 : 0.3;
       else if (h.inst === 'snare' && h.strength > 0.7 && h.e > 0.45) p = 0.12;
       else if (h.down && h.e > 0.7) p = 0.05;
-      p *= cfg.combo * (diffIdx >= 3 ? 1 : 0.5);
+      p *= cfg.combo * (diffIdx >= 3 ? 1 : 0.5) * (h.crash ? Math.max(0.3, cfg.trans) : 1);
       if (p <= 0 || rng() > p) return false;
-      const bigOk = !!(sec && sec.drop);
+      const bigOk = !!((sec && sec.drop) || h.crash === 2);
       const cands = lib.combos.filter(function (c) { return bigOk || (c.name !== 'tower' && c.name !== 'tower-pair'); });
       for (let tries = 0; tries < 4 && cands.length; tries++) {
         const c = cands.splice(rng.weighted(cands.map(function (x) { return x.w; })), 1)[0];
@@ -686,12 +755,45 @@
       if (occupied(tb, lane, layer) || blocked(tb, lane, layer)) return;
       place(hand, tb, { lane: lane, layer: layer, dir: c.dir });
     };
-    let mode = 'zigzag', modeUntil = -1e9;
+    // a burst chain (v4 "chain" slider): the head is an ordinary note, the links run one or two cells along its cut
+    const chains = [], ghosts = [];
+    const chainTry = function (hand, c, bs, hi, h) {
+      if (diffIdx < 2 || cfg.chains <= 0 || c.dir === 8) return false;
+      const nx = hits[hi + 1];
+      const room = nx ? nx.bs - bs : 4;
+      if (room < 0.6) return false;
+      // chains suit held, spaced-out notes: the more room after the head, the likelier
+      let p = 0.14 * cfg.chains * (0.5 + h.strength) * (h.e > 0.5 ? 1.3 : 0.8) * (room >= 1.5 ? 2.2 : room >= 1 ? 1.5 : 1);
+      if (rng() > p) return false;
+      for (const L of (rng() < 0.5 ? [2, 1] : [1, 2])) {
+        const tl = c.lane + DX[c.dir] * L, ty = c.layer + DY[c.dir] * L;
+        if (tl < 0 || tl > 3 || ty < 0 || ty > 2) continue;
+        const cells = [];
+        for (let i = 1; i <= L; i++) cells.push([c.lane + DX[c.dir] * i, c.layer + DY[c.dir] * i]);
+        let ok = true;
+        for (const cl of cells) {
+          for (const t of [bs + 0.05, bs + 0.125, bs + 0.25, bs + 0.35]) if (occupied(t, cl[0], cl[1]) || blocked(t, cl[0], cl[1])) ok = false;
+          for (let j = notes.length - 1; j >= 0 && j >= notes.length - 12; j--) {
+            const nn = notes[j];
+            if (Math.abs(nn.time - bs) < 0.4 && nn.lane === cl[0] && nn.layer === cl[1]) ok = false;
+          }
+        }
+        if (!ok) continue;
+        const tb = bs + 0.25;
+        for (const cl of cells) for (const t of [bs + 0.125, bs + 0.25]) { ghosts.push({ time: t, lane: cl[0], layer: cl[1] }); occ.add(keyOf(t, cl[0], cl[1])); }
+        chains.push({ time: bs, tailTime: tb, color: hand, lane: c.lane, layer: c.layer, dir: c.dir, tx: tl, ty: ty, slices: L === 2 ? 5 : 4, squish: 1 });
+        hands[hand] = { lane: tl, layer: ty, dir: c.dir, beat: tb, v: VERT[c.dir], h: HORIZ[c.dir] };
+        return true;
+      }
+      return false;
+    };
+    let mode = 'zigzag', modeUntil = -1e9, lastSecK = -1;
     let skipped = 0;
     const modeList = [];
     for (let hi = 0; hi < hits.length; hi++) {
       const h = hits[hi];
-      if (h.bs >= modeUntil) {
+      if (h.bs >= modeUntil || (h.s === 0 && secStart.has(h.k) && h.k !== lastSecK)) {
+        lastSecK = h.k;
         const list = cfg.style === 'tech' ? ['tech', 'windmill', 'zigzag']
           : cfg.style === 'minimal' ? ['minimal', 'pillar', 'wave']
           : cfg.style === 'flow' ? ['wave', 'zigzag', 'pillar']
@@ -751,22 +853,23 @@
       }
       place(useHand, h.bs, c);
       lastHand = useHand;
-      sliderTail(useHand, c, h.bs, hi, h);
+      if (!chainTry(useHand, c, h.bs, hi, h)) sliderTail(useHand, c, h.bs, hi, h);
     }
 
     const streamBeats = new Set();
     for (const h of hits) if (h.stream) streamBeats.add(h.k);
-    const bombs = planBombs(an, cfg, pri, rng, notes, walls, occupied, blocked, streamBeats);
+    const bombs = planBombs(an, cfg, pri, rng, notes.concat(ghosts.map(function (g) { return { time: g.time, lane: g.lane, layer: g.layer, color: 0, dir: 8 }; })), walls, occupied, blocked, streamBeats);
     const events = cfg.lights ? (an.inst && ns.planMoodLights ? ns.planMoodLights(an, cfg, rng) : planLights(an, cfg, pri, rng)) : [];
     const art = planWallArt(an, cfg, pri, rng);
 
     notes.sort(function (a, b) { return a.time - b.time; });
     const allWalls = walls.concat(art).sort(function (a, b) { return a.time - b.time; });
     return {
-      map: { notes: notes, bombs: bombs, walls: allWalls, events: events },
+      map: { notes: notes, bombs: bombs, walls: allWalls, events: events, chains: chains },
       seed: seed,
       hits: hits.length,
       streamHits: hits.filter(function (x) { return x.stream; }).length,
+      fills: hits.fills || 0, crashes: hits.crashes || 0, chainCount: chains.length, builtPatterns: builtUsed,
       skipped: skipped,
       modes: modeList
     };
@@ -968,7 +1071,10 @@
       lightMood: options.lightMood === undefined ? 1 : options.lightMood,
       instruments: options.instruments === undefined ? 1 : options.instruments,
       repeat: options.repeat === undefined ? 1 : options.repeat,
-      follow: (options.follow === undefined ? 1 : options.follow) * (style === 'minimal' ? 0.3 : 1)
+      follow: (options.follow === undefined ? 1 : options.follow) * (style === 'minimal' ? 0.3 : 1),
+      contrast: options.contrast === undefined ? 1 : options.contrast,
+      trans: (options.transitions === undefined ? 1 : options.transitions) * (style === 'minimal' ? 0.5 : 1),
+      chains: options.chains === undefined ? 1 : options.chains
     };
     if (style === 'chaos') cfg.chaos = Math.max(cfg.chaos, 0.45);
     if (style === 'minimal') { cfg.walls *= 0.4; cfg.bombs *= 0.5; }
@@ -1005,6 +1111,7 @@
         candidates: candidates,
         hits: best.hits,
         streamHits: best.streamHits,
+        fills: best.fills, crashes: best.crashes, chainCount: best.chainCount, builtPatterns: best.builtPatterns,
         skipped: best.skipped,
         modes: best.modes.slice(0, 40),
         stats: stats,

@@ -283,6 +283,18 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <input type="range" id="repeat" min="0" max="150" value="100" step="5">
         </label>
         <label>
+          <span class="lbl">Dynamics (calm vs epic) <output id="oContrast"></output></span>
+          <input type="range" id="contrast" min="0" max="200" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Transitions (fills, drops) <output id="oTrans"></output></span>
+          <input type="range" id="transitions" min="0" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Chains (v4 maps) <output id="oChains"></output></span>
+          <input type="range" id="chains" min="0" max="200" value="100" step="5">
+        </label>
+        <label>
           <span class="lbl">Hit following <output id="oFollow"></output></span>
           <input type="range" id="follow" min="0" max="150" value="100" step="5">
         </label>
@@ -608,6 +620,9 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       combos: num('combos') / 100,
       streams: num('streams') / 100,
       follow: num('follow') / 100,
+      contrast: num('contrast') / 100,
+      transitions: num('transitions') / 100,
+      chains: num('chains') / 100,
       lights: $('lights').checked,
       candidates: parseInt($('candidates').value, 10)
     };
@@ -1081,6 +1096,24 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       ctx.globalAlpha = 1;
     }
 
+    // chains: the links between a head and its tail
+    (m.chains || []).forEach(function (ch) {
+      var D0 = ch.time - bsNow, D1 = ch.tailTime - bsNow;
+      if (D1 < -0.15 || D0 > LOOK) return;
+      var cc = ch.color === 0 ? RGB.red : RGB.blue;
+      for (var li = 1; li <= ch.slices; li++) {
+        var fr = li / ch.slices, Dl = D0 + (D1 - D0) * fr;
+        if (Dl < -0.1) continue;
+        var pl = proj(ch.lane + (ch.tx - ch.lane) * fr, ch.layer + (ch.ty - ch.layer) * fr, Dl);
+        var sz = cell * 0.34 * pl.s;
+        ctx.globalAlpha = Dl < 0 ? Math.max(0, 1 + Dl / 0.1) : 1;
+        ctx.fillStyle = rgba(mix(cc, [255, 255, 255], 0.25), 0.95);
+        ctx.beginPath(); ctx.arc(pl.x, pl.y, sz / 2, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    });
+
     // bombs
     for (var bi = 0; bi < m.bombs.length; bi++) {
       var bo = m.bombs[bi];
@@ -1170,6 +1203,33 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     }
     ctx.restore();
     if (FX.parts.length > 400) FX.parts.splice(0, FX.parts.length - 400);
+
+    // section banner: the song's big moments get a title card
+    (function () {
+      var kNow = (t - an.phase) / an.period;
+      for (var si = 0; si < an.sections.length; si++) {
+        var sc = an.sections[si];
+        var dB = kNow - sc.start;
+        if (sc.drop && dB >= -1 && dB < 3) {
+          var a = dB < 0 ? 0.5 + 0.5 * (dB + 1) : Math.max(0, 1 - dB / 3);
+          ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center';
+          ctx.font = '900 ' + Math.round(Math.min(W * 0.16, 64) * (1 + 0.25 * Math.max(0, 1 - dB))) + 'px system-ui, sans-serif';
+          ctx.shadowColor = rgba(ecol, 1); ctx.shadowBlur = 28; ctx.fillStyle = '#fff';
+          ctx.fillText(dB < 0 ? 'READY' : 'DROP', W / 2, H * 0.34);
+          ctx.restore();
+        }
+        if (dB >= 0 && dB < 6 && sc.drop) FX.flash = Math.max(FX.flash, 0.5 * Math.max(0, 1 - dB));
+      }
+      var bd = BSM.analyzeMood(an).builds;
+      for (var bi2 = 0; bi2 < bd.length; bi2++) {
+        if (kNow >= bd[bi2].start && kNow < bd[bi2].end) {
+          var pr = (kNow - bd[bi2].start) / Math.max(1, bd[bi2].end - bd[bi2].start);
+          ctx.fillStyle = rgba(ecol, 0.85); ctx.fillRect(W * 0.2, H * 0.06, W * 0.6 * pr, 4);
+          ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(W * 0.2 + W * 0.6 * pr, H * 0.06, W * 0.6 * (1 - pr), 4);
+          FX.shake = Math.max(FX.shake, 0.15 + 0.5 * pr);
+        }
+      }
+    })();
 
     // edge vignette / hit flash
     FX.flash *= 0.9;
@@ -1346,6 +1406,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       ['Dots', st.dots, 'hit from any direction'],
       ['Bombs', st.bombs, 'free cells, away from swings'],
       ['Walls', st.walls, st.fullWalls + ' full / ' + st.crouchWalls + ' crouch'],
+      ['Chains', (entry.map.chains || []).length, 'burst links (modern v4 format)'],
+      ['Transitions', (entry.meta.fills || 0) + (entry.meta.crashes || 0), (entry.meta.fills || 0) + ' fills, ' + (entry.meta.crashes || 0) + ' crash hits'],
       ['Light events', st.events, 'lightshow v2'],
       ['Playability', ok ? 'Pass' : 'Review', v.reachViolations + ' fast moves, ' + v.errors.length + ' errors']
     ];
@@ -1409,6 +1471,9 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
      ['lightAmount', 'oLightAmt', function (v) { return v + '%'; }],
      ['lightMood', 'oLightMood', function (v) { return v + '%'; }],
      ['instruments', 'oInst', function (v) { return v + '%'; }],
+     ['contrast', 'oContrast', function (v) { return v + '%'; }],
+     ['transitions', 'oTrans', function (v) { return v + '%'; }],
+     ['chains', 'oChains', function (v) { return v + '%'; }],
      ['follow', 'oFollow', function (v) { return v + '%'; }],
      ['tech', 'oTech', function (v) { return v + '%'; }],
      ['combos', 'oCombos', function (v) { return v + '%'; }],
