@@ -329,6 +329,20 @@
       beatBass[k] = bb; beatHigh[k] = hh; beatOnset[k] = oo;
       for (let b = 0; b < NBANDS; b++) beatBands[k * NBANDS + b] = bandAcc[b] / cnt;
     }
+    // timbral brightness per beat: high-band minus low-band level, scaled across the song (dark / warm .. bright / airy)
+    const beatBright = new Float32Array(K);
+    {
+      const raw = new Float64Array(K);
+      for (let k = 0; k < K; k++) {
+        let hi = 0, lo = 0;
+        for (let b = 5; b < NBANDS; b++) hi += beatBands[k * NBANDS + b];
+        for (let b = 1; b < 4; b++) lo += beatBands[k * NBANDS + b];
+        raw[k] = hi / (NBANDS - 5) - lo / 3;
+      }
+      const srt = Float64Array.from(raw).sort();
+      const lo5 = srt[Math.floor(0.05 * (K - 1))], hi95 = srt[Math.floor(0.95 * (K - 1))];
+      for (let k = 0; k < K; k++) beatBright[k] = ns.clamp((raw[k] - lo5) / Math.max(1e-6, hi95 - lo5), 0, 1);
+    }
     const sortedE = Float64Array.from(beatEnergyRaw).sort();
     const eLo = sortedE[Math.floor(0.05 * (K - 1))], eHi = sortedE[Math.floor(0.95 * (K - 1))];
     const beatEnergy = new Float32Array(K);
@@ -354,7 +368,7 @@
       sr: sr, hop: hop, fps: fps, duration: duration,
       bpm: bpm, period: P, phase: A, tempoConfidence: tempo.confidence,
       beatCount: K, beatTimes: beatT,
-      beatEnergy: beatEnergy, beatBass: beatBass, beatHigh: beatHigh, beatOnset: beatOnset,
+      beatEnergy: beatEnergy, beatBright: beatBright, beatBass: beatBass, beatHigh: beatHigh, beatOnset: beatOnset,
       downbeat: downbeat,
       onset: onset, frames: frames,
       onsetRate: onsetRate, onsetTimes: Float32Array.from(peaks2), onset2: onset2,

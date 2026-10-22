@@ -589,7 +589,7 @@
     const streamBeats = new Set();
     for (const h of hits) if (h.stream) streamBeats.add(h.k);
     const bombs = planBombs(an, cfg, pri, rng, notes, walls, occupied, blocked, streamBeats);
-    const events = cfg.lights ? planLights(an, cfg, pri, rng) : [];
+    const events = cfg.lights ? (an.inst && ns.planMoodLights ? ns.planMoodLights(an, cfg, rng) : planLights(an, cfg, pri, rng)) : [];
     const art = planWallArt(an, cfg, pri, rng);
 
     notes.sort(function (a, b) { return a.time - b.time; });
@@ -791,6 +791,7 @@
       density: mult(options.density),
       style: style,
       flow: style === 'flow' ? 1.6 : 1,
+      lightMood: options.lightMood === undefined ? 1 : options.lightMood,
       instruments: options.instruments === undefined ? 1 : options.instruments,
       repeat: options.repeat === undefined ? 1 : options.repeat
     };

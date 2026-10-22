@@ -128,6 +128,39 @@
     return { bars: lib.bars.length, groups: ls.groups.length };
   };
 
+  // ---- emotion layer ----
+  // Library groups are tinted and dimmed to match the song's feeling, accents follow the kick and snare, and the show
+  // builds, goes dark for a beat and detonates at drops. All of it reuses lights (group ids, filters, boxes) the learned show uses.
+  function tint(v, feel, A, sens, bld, rng) {
+    if (!v || v.b === undefined) return v;
+    const o = Object.assign({}, v);
+    if (o.b > 0) o.b = ns.clamp(o.b * (1 + sens * (A - 0.5) * 0.9), 0.05, 1);
+    if (o.c === 0 || o.c === 1) {
+      if (bld) {
+        if (rng() < sens * (0.3 + 0.5 * bld.progress)) { o.c = 2; o.b = Math.min(1, o.b * 1.15); }
+      } else if (rng() < 0.65 * sens) o.c = rng() < feel.color1 ? 1 : 0;
+    }
+    return o;
+  }
+  function accentKit(lib) {
+    const use = new Map();
+    for (const b of lib.bars) for (const g of b.g) if (g.t === 1) {
+      const u = use.get(g.g) || { n: 0, e: g.e[0] };
+      u.n += b.n; use.set(g.g, u);
+    }
+    const top = Array.from(use.entries()).sort(function (a, b) { return b[1].n - a[1].n; }).slice(0, 4);
+    if (!top.length) return null;
+    const tab = lib.tab;
+    return top.map(function (t) { return { g: t[0], f: tab.f[t[1].e[0]], x: tab.x[1][t[1].e[1]] }; });
+  }
+  function accent(kit, i, bs, list) {
+    const k = kit[i % kit.length];
+    return {
+      b: bs, g: k.g, t: 1,
+      e: [{ f: k.f, x: k.x, l: list.map(function (a) { return { b: a.o, v: { e: -1, p: a.p || 0, c: a.c, b: a.b, f: 0, sb: 0, sf: 0 } }; }) }]
+    };
+  }
+
   // -> { groups, boosts, basic } or null when the brain has no v4 lighting to draw on
   ns.planLights4 = function (an, cfg, brain, rng) {
     const lib = ns.normalizeBrain(brain).lightLib;
@@ -138,6 +171,9 @@
     for (const g of lib.init) out.push(expand(lib, g, 0));
 
     const amount = cfg.lightAmount === undefined ? 1 : cfg.lightAmount;
+    const sens = cfg.lightMood === undefined ? 1 : cfg.lightMood;
+    const kit = an.inst ? accentKit(lib) : null;
+    ns.analyzeMood(an);
     const recent = [];
     let prevIds = new Set();
     const first = ((an.downbeat % 4) + 4) % 4;
@@ -165,16 +201,57 @@
       if (recent.length > 6) recent.shift();
       prevIds = idsOf(bar.g);
       const base = bsOf(k);
-      for (const g of bar.g) out.push(expand(lib, g, base + g.o));
+      const sm = ns.moodSectionAt(an, k), bld = ns.buildAt(an, k);
+      for (const g of bar.g) {
+        const x = expand(lib, g, base + g.o);
+        if (x.t === 1 && sens > 0) x.e = x.e.map(function (eb) {
+          return { f: eb.f, x: eb.x, l: eb.l.map(function (l) { return { b: l.b, v: tint(l.v, sm.feel, sm.mood.A, sens, bld, rng) }; }) };
+        });
+        out.push(x);
+      }
+      // accents on the kick and the snare (only where the music is lively)
+      if (kit && sens > 0 && sm.mood.A > 0.35) {
+        const t0 = an.phase + k * P, t1 = t0 + 4 * P;
+        let kc = 0, sc = 0;
+        for (const e of an.inst.kick) {
+          if (e.t < t0 || e.t >= t1 || e.s < 0.65 || kc >= 3 || rng() > 0.55 * sens * sm.feel.busy) continue;
+          kc++;
+          out.push(accent(kit, 0, e.t / P, [{ o: 0, c: sm.feel.main === 'RED' ? 0 : 1, b: 0.9 }, { o: 0.3, c: 0, b: 0, p: 1 }]));
+        }
+        for (const e of an.inst.snare) {
+          if (e.t < t0 || e.t >= t1 || e.s < 0.6 || sc >= 2 || rng() > 0.5 * sens * sm.feel.busy) continue;
+          sc++;
+          out.push(accent(kit, 1, e.t / P, [{ o: 0, c: sm.feel.alt === 'WHITE' ? 2 : (sm.feel.main === 'RED' ? 1 : 0), b: 1 }, { o: 0.25, c: 0, b: 0, p: 1 }]));
+        }
+      }
+      // rising flashes through the last bar before a drop
+      if (kit && sens > 0 && bld && bld.b.end - k <= 4 && bld.b.end - k > 0) {
+        const lead = bsOf(bld.b.end - 4);
+        for (let j = 0; j < 3; j++) {
+          const n = [1, 2, 4][j];
+          for (let i = 0; i < n; i++) out.push(accent(kit, 2 + (i % 2), lead + j + i / n, [{ o: 0, c: 2, b: 0.55 + 0.15 * j }, { o: 0.2 / n, c: 0, b: 0, p: 1 }]));
+        }
+      }
     }
 
-    // colour boost (the lights' alternate palette) while the music is at its loudest
+    // the beat before a drop goes dark, then everything lights white
+    let groups = out;
+    if (kit && sens > 0) {
+      const mood = ns.analyzeMood(an);
+      for (const b of mood.builds) {
+        const dark0 = bsOf(b.end - 1), dark1 = bsOf(b.end);
+        groups = groups.filter(function (g) { return !(g.b >= dark0 - 1e-6 && g.b < dark1 - 1e-6) || g.accent; });
+        for (let i = 0; i < Math.min(3, kit.length); i++) groups.push(accent(kit, i, dark1, [{ o: 0, c: 2, b: 1 }, { o: 1.5, c: 0, b: 0.3, p: 1 }]));
+      }
+    }
+    // colour boost (the lights' alternate palette) while the feeling is at its biggest
     const boosts = [];
     let on = false;
-    for (const s of an.sections) {
-      const want = s.level === 'high';
+    an.sections.forEach(function (s, i) {
+      const e = ns.analyzeMood(an).sections[i].emotion;
+      const want = s.level === 'high' || e === 'euphoric' || e === 'aggressive';
       if (want !== on) { boosts.push({ time: bsOf(s.start), on: want }); on = want; }
-    }
-    return { groups: out, boosts: boosts, basic: [] };
+    });
+    return { groups: groups, boosts: boosts, basic: [] };
   };
 })(BSM);

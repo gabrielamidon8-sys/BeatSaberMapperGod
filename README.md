@@ -5,6 +5,7 @@ A generative Beat Saber mapper that runs entirely in the browser. Drop in a song
 ## What it does
 - Finds tempo (with octave correction), beats, downbeats, onsets and sections in any song.
 - Senses instruments (kick, snare, hat, lead with a pitch proxy) and finds bars that repeat, so notes follow what is playing and choreography repeats where the music does.
+- Reads each section's feeling (somber, calm, tense, uplifting, aggressive, euphoric) and lights to it: kick, snare, hat and lead drive the lights, colors follow mood and pitch, and drops get a build-up, a dark beat and a white detonation.
 - Generates Easy to Expert+ maps with swing-parity-aware flow, streams, chords, bombs, gameplay walls and decorative wall art.
 - Learns from maps in v2, v3 and v4 formats (rhythm, flow, density, walls, wall art, and v4 light shows).
 - Exports classic v2 maps or v4 maps with a composed light show.

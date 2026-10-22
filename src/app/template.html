@@ -281,6 +281,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <span class="lbl">Repeat patterns <output id="oRepeat"></output></span>
           <input type="range" id="repeat" min="0" max="150" value="100" step="5">
         </label>
+        <label>
+          <span class="lbl">Light amount <output id="oLightAmt"></output></span>
+          <input type="range" id="lightAmount" min="20" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Emotion sensitivity <output id="oLightMood"></output></span>
+          <input type="range" id="lightMood" min="0" max="150" value="100" step="5">
+        </label>
         <label class="check"><input type="checkbox" id="lights" checked>Lighting events</label>
         <label>
           <span class="lbl">Seed</span>
@@ -343,6 +351,12 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       <span><i style="background:#5fd18a"></i>Snare</span>
       <span><i style="background:#4cc9f0"></i>Hat</span>
       <span><i style="background:#e060d0"></i>Lead</span>
+      <span><i style="background:#3b4f9a"></i>Somber</span>
+      <span><i style="background:#4cc9f0"></i>Calm</span>
+      <span><i style="background:#b0476a"></i>Tense</span>
+      <span><i style="background:#5fd18a"></i>Uplifting</span>
+      <span><i style="background:#e5484d"></i>Aggressive</span>
+      <span><i style="background:#f0a030"></i>Euphoric</span>
       <span><i style="background:#e0a017"></i>Playhead</span>
     </div>
     <div class="status" id="status" role="status" hidden></div>
@@ -479,6 +493,12 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     }).then(function () { setBusy(false); });
   }
 
+  function emotionArc(an) {
+    var m = BSM.analyzeMood(an), cnt = {}, order = [];
+    m.sections.forEach(function (s) { if (!cnt[s.emotion]) { cnt[s.emotion] = 0; order.push(s.emotion); } cnt[s.emotion]++; });
+    return order.map(function (e) { return cnt[e] + ' ' + e; }).join(', ') + (m.builds.length ? '; ' + m.builds.length + ' build-ups' : '');
+  }
+
   /* ---------- song facts ---------- */
   function renderSongInfo() {
     var an = S.an, box = $('songInfo');
@@ -490,6 +510,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       '<div><dt>Beat lock</dt><dd>' + Math.round(an.tempoConfidence * 100) + '%</dd></div>' +
       '<div><dt>Sections</dt><dd>' + an.sections.length + '</dd></div>' +
       '<div><dt>Instruments sensed</dt><dd>' + an.inst.kick.length + ' kick, ' + an.inst.snare.length + ' snare, ' + an.inst.hat.length + ' hat, ' + an.inst.lead.length + ' lead</dd></div>' +
+      '<div><dt>Emotional arc</dt><dd>' + emotionArc(an) + '</dd></div>' +
       '<div><dt>Repeated bars</dt><dd>' + Math.round(an.study.linkedShare * 100) + '% of ' + an.study.bars + '</dd></div>';
   }
 
@@ -548,6 +569,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       walls: num('walls') / 100,
       bombs: num('bombs') / 100,
       art: num('art') / 100,
+      lightAmount: num('lightAmount') / 100,
+      lightMood: num('lightMood') / 100,
       instruments: num('instruments') / 100,
       repeat: num('repeat') / 100,
       streams: num('streams') / 100,
@@ -935,6 +958,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
   }
 
   /* ---------- drawing: timeline ---------- */
+  var EMO_COL = { somber: '#3b4f9a', calm: '#4cc9f0', tense: '#b0476a', uplifting: '#5fd18a', aggressive: '#e5484d', euphoric: '#f0a030' };
   function drawTimeline() {
     var g = fit($('timeline'));
     var ctx = g.ctx, W = g.W, H = g.H;
@@ -947,7 +971,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     an.sections.forEach(function (s, i) {
       var t0 = an.phase + s.start * an.period, t1 = an.phase + s.end * an.period;
       if (i % 2) { ctx.fillStyle = 'rgba(255,255,255,0.035)'; ctx.fillRect(x(t0), 0, x(t1) - x(t0), H); }
-      ctx.fillStyle = LEVEL_COL[s.level] || '#555';
+      var emo = BSM.analyzeMood(an).sections[i].emotion;
+      ctx.fillStyle = EMO_COL[emo] || LEVEL_COL[s.level] || '#555';
       ctx.fillRect(x(t0), H - 5, Math.max(1, x(t1) - x(t0) - 1), 5);
     });
     if (S.peaks) {
@@ -1084,6 +1109,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
      ['chaos', 'oChaos', function (v) { return v + '%'; }],
      ['walls', 'oWalls', function (v) { return v + '%'; }],
      ['bombs', 'oBombs', function (v) { return v + '%'; }],
+     ['lightAmount', 'oLightAmt', function (v) { return v + '%'; }],
+     ['lightMood', 'oLightMood', function (v) { return v + '%'; }],
      ['instruments', 'oInst', function (v) { return v + '%'; }],
      ['repeat', 'oRepeat', function (v) { return v + '%'; }],
      ['art', 'oArt', function (v) { return v + '%'; }],

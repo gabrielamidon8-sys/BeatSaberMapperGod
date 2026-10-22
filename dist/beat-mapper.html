@@ -281,6 +281,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <span class="lbl">Repeat patterns <output id="oRepeat"></output></span>
           <input type="range" id="repeat" min="0" max="150" value="100" step="5">
         </label>
+        <label>
+          <span class="lbl">Light amount <output id="oLightAmt"></output></span>
+          <input type="range" id="lightAmount" min="20" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Emotion sensitivity <output id="oLightMood"></output></span>
+          <input type="range" id="lightMood" min="0" max="150" value="100" step="5">
+        </label>
         <label class="check"><input type="checkbox" id="lights" checked>Lighting events</label>
         <label>
           <span class="lbl">Seed</span>
@@ -343,6 +351,12 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       <span><i style="background:#5fd18a"></i>Snare</span>
       <span><i style="background:#4cc9f0"></i>Hat</span>
       <span><i style="background:#e060d0"></i>Lead</span>
+      <span><i style="background:#3b4f9a"></i>Somber</span>
+      <span><i style="background:#4cc9f0"></i>Calm</span>
+      <span><i style="background:#b0476a"></i>Tense</span>
+      <span><i style="background:#5fd18a"></i>Uplifting</span>
+      <span><i style="background:#e5484d"></i>Aggressive</span>
+      <span><i style="background:#f0a030"></i>Euphoric</span>
       <span><i style="background:#e0a017"></i>Playhead</span>
     </div>
     <div class="status" id="status" role="status" hidden></div>
@@ -866,6 +880,20 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
       beatBass[k] = bb; beatHigh[k] = hh; beatOnset[k] = oo;
       for (let b = 0; b < NBANDS; b++) beatBands[k * NBANDS + b] = bandAcc[b] / cnt;
     }
+    // timbral brightness per beat: high-band minus low-band level, scaled across the song (dark / warm .. bright / airy)
+    const beatBright = new Float32Array(K);
+    {
+      const raw = new Float64Array(K);
+      for (let k = 0; k < K; k++) {
+        let hi = 0, lo = 0;
+        for (let b = 5; b < NBANDS; b++) hi += beatBands[k * NBANDS + b];
+        for (let b = 1; b < 4; b++) lo += beatBands[k * NBANDS + b];
+        raw[k] = hi / (NBANDS - 5) - lo / 3;
+      }
+      const srt = Float64Array.from(raw).sort();
+      const lo5 = srt[Math.floor(0.05 * (K - 1))], hi95 = srt[Math.floor(0.95 * (K - 1))];
+      for (let k = 0; k < K; k++) beatBright[k] = ns.clamp((raw[k] - lo5) / Math.max(1e-6, hi95 - lo5), 0, 1);
+    }
     const sortedE = Float64Array.from(beatEnergyRaw).sort();
     const eLo = sortedE[Math.floor(0.05 * (K - 1))], eHi = sortedE[Math.floor(0.95 * (K - 1))];
     const beatEnergy = new Float32Array(K);
@@ -891,7 +919,7 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
       sr: sr, hop: hop, fps: fps, duration: duration,
       bpm: bpm, period: P, phase: A, tempoConfidence: tempo.confidence,
       beatCount: K, beatTimes: beatT,
-      beatEnergy: beatEnergy, beatBass: beatBass, beatHigh: beatHigh, beatOnset: beatOnset,
+      beatEnergy: beatEnergy, beatBright: beatBright, beatBass: beatBass, beatHigh: beatHigh, beatOnset: beatOnset,
       downbeat: downbeat,
       onset: onset, frames: frames,
       onsetRate: onsetRate, onsetTimes: Float32Array.from(peaks2), onset2: onset2,
@@ -2204,7 +2232,7 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
     const streamBeats = new Set();
     for (const h of hits) if (h.stream) streamBeats.add(h.k);
     const bombs = planBombs(an, cfg, pri, rng, notes, walls, occupied, blocked, streamBeats);
-    const events = cfg.lights ? planLights(an, cfg, pri, rng) : [];
+    const events = cfg.lights ? (an.inst && ns.planMoodLights ? ns.planMoodLights(an, cfg, rng) : planLights(an, cfg, pri, rng)) : [];
     const art = planWallArt(an, cfg, pri, rng);
 
     notes.sort(function (a, b) { return a.time - b.time; });
@@ -2406,6 +2434,7 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
       density: mult(options.density),
       style: style,
       flow: style === 'flow' ? 1.6 : 1,
+      lightMood: options.lightMood === undefined ? 1 : options.lightMood,
       instruments: options.instruments === undefined ? 1 : options.instruments,
       repeat: options.repeat === undefined ? 1 : options.repeat
     };
@@ -2454,6 +2483,200 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
   ns.generateMap = generateMap;
   ns.planHits = planHits;
   ns.SLOTS = SLOTS;
+})(BSM);
+
+;
+/* Emotional reading of a song, and lighting that follows it.
+ *
+ * Mood per section comes from two axes measured on the audio:
+ *   arousal    how much is going on: loudness, onset density, kick and snare rate
+ *   brightness timbre, from the balance of high and low frequencies (dark and warm .. bright and airy)
+ * which place a section among six feelings:
+ *   somber / calm     low arousal, dark / bright
+ *   tense / uplifting medium arousal, dark / bright
+ *   aggressive / euphoric  high arousal, dark / bright
+ * plus a "build" flag on the bars that lead into a drop.
+ * Each feeling has a colour policy and a light vocabulary (see PALETTE and planMoodLights). */
+(function (ns) {
+  'use strict';
+
+  const LIGHT = ns.LIGHT, GROUP = ns.GROUP;
+  // main / alt colour, how hard the lights hit, how busy they are
+  const FEEL = {
+    somber:     { main: 'BLUE', alt: 'BLUE',  hard: 0.15, busy: 0.30, color1: 0.9 },
+    calm:       { main: 'BLUE', alt: 'WHITE', hard: 0.20, busy: 0.40, color1: 0.8 },
+    tense:      { main: 'RED',  alt: 'BLUE',  hard: 0.50, busy: 0.60, color1: 0.3 },
+    uplifting:  { main: 'BLUE', alt: 'RED',   hard: 0.65, busy: 0.75, color1: 0.5 },
+    aggressive: { main: 'RED',  alt: 'BLUE',  hard: 1.00, busy: 1.00, color1: 0.15 },
+    euphoric:   { main: 'RED',  alt: 'BLUE',  hard: 0.90, busy: 1.00, color1: 0.5 }
+  };
+  ns.FEEL = FEEL;
+
+  function clamp01(x) { return ns.clamp(x, 0, 1); }
+
+  // Compute and cache the song's emotional map on the analysis object.
+  ns.analyzeMood = function (an) {
+    if (an.mood) return an.mood;
+    const K = an.beatCount;
+    const onPer = new Float32Array(K);
+    if (an.onsetTimes) for (let i = 0; i < an.onsetTimes.length; i++) {
+      const k = Math.floor((an.onsetTimes[i] - an.phase) / an.period);
+      if (k >= 0 && k < K) onPer[k]++;
+    }
+    const beatA = new Float32Array(K);
+    for (let k = 0; k < K; k++) beatA[k] = clamp01(0.62 * an.beatEnergy[k] + 0.38 * clamp01(onPer[k] / 4));
+    const bright = an.beatBright || new Float32Array(K).fill(0.5);
+
+    // judge each section against the song itself, so a quiet song still has its own highs and lows
+    const secs = an.sections.map(function (sec, i) {
+      let a = 0, b = 0, n = 0;
+      for (let k = sec.start; k < sec.end && k < K; k++) { a += beatA[k]; b += bright[k]; n++; }
+      a = n ? a / n : 0; b = n ? b / n : 0.5;
+      const tex = an.study && an.study.texture ? an.study.texture[i] : null;
+      if (tex) a = clamp01(0.8 * a + 0.2 * clamp01((tex.kick + tex.snare) / 4));
+      return { A: a, B: b, i: i };
+    });
+    const aS = secs.map(function (s) { return s.A; }).sort(function (x, y) { return x - y; });
+    const bS = secs.map(function (s) { return s.B; }).sort(function (x, y) { return x - y; });
+    const q = function (arr, p) { return arr[Math.min(arr.length - 1, Math.floor(p * (arr.length - 1)))]; };
+    const aLo = q(aS, 0.33), aHi = q(aS, 0.66), bMid = q(bS, 0.5);
+    const sections = secs.map(function (s) {
+      const level = s.A < aLo ? 0 : (s.A < aHi ? 1 : 2);
+      const bright2 = s.B >= bMid;
+      const emotion = level === 0 ? (bright2 ? 'calm' : 'somber') : level === 1 ? (bright2 ? 'uplifting' : 'tense') : (bright2 ? 'euphoric' : 'aggressive');
+      return { emotion: emotion, A: s.A, B: s.B };
+    });
+    // bars that lead into a drop
+    const builds = [];
+    an.sections.forEach(function (sec, i) {
+      if (i + 1 < an.sections.length && an.sections[i + 1].drop) {
+        const len = Math.min(8, sec.end - sec.start);
+        builds.push({ start: sec.end - Math.min(len, 8), end: sec.end, drop: sec.end });
+      }
+    });
+    an.mood = { sections: sections, beatA: beatA, beatB: bright, builds: builds };
+    return an.mood;
+  };
+  ns.moodSectionAt = function (an, k) {
+    const m = ns.analyzeMood(an);
+    for (let i = 0; i < an.sections.length; i++) if (k >= an.sections[i].start && k < an.sections[i].end) return { i: i, sec: an.sections[i], mood: m.sections[i], feel: FEEL[m.sections[i].emotion] };
+    const j = an.sections.length - 1;
+    return { i: j, sec: an.sections[j], mood: m.sections[j], feel: FEEL[m.sections[j].emotion] };
+  };
+  ns.buildAt = function (an, k) {
+    for (const b of ns.analyzeMood(an).builds) if (k >= b.start && k < b.end) return { progress: (k - b.start) / Math.max(1, b.end - b.start), b: b };
+    return null;
+  };
+
+  /* Classic (v2) light events that follow the song's feeling, its instruments and its build-ups.
+   *   kick   -> centre lights      snare -> back lights and rings      hat -> side lasers (quick, on busy sections)
+   *   lead   -> a side laser coloured by its pitch (low red, high blue, in between white)
+   * Calm music gets slow fades and sparse hits; aggressive music gets hard flashes on nearly every attack.
+   * Before a drop the show builds (flashes double their rate each beat), goes dark for one beat, then lights everything white. */
+  ns.planMoodLights = function (an, cfg, rng) {
+    const mood = ns.analyzeMood(an);
+    const P = an.period;
+    const amount = cfg.lightAmount === undefined ? 1 : cfg.lightAmount;
+    const sens = cfg.lightMood === undefined ? 1 : cfg.lightMood;
+    const ev = [];
+    const push = function (bs, type, value) { ev.push({ time: bs, type: type, value: value, float: 1 }); };
+    const col = function (name) { return LIGHT[name]; };
+    const inSec = function (list, sec) {
+      const t0 = an.phase + sec.start * P, t1 = an.phase + sec.end * P;
+      return list.filter(function (e) { return e.t >= t0 && e.t < t1; });
+    };
+    const bsT = function (t) { return t / P; };
+    const bsK = function (k) { return (an.phase + k * P) / P; };
+    const hasInst = !!an.inst;
+
+    an.sections.forEach(function (sec, si) {
+      const m = mood.sections[si], F = FEEL[m.emotion];
+      const main = col(F.main), alt = col(F.alt), white = LIGHT.WHITE;
+      const start = bsK(sec.start);
+      // the feeling's opening gesture
+      push(start, GROUP.BACK, main.trans);
+      push(start, GROUP.CENTER, (m.A > 0.5 ? white : main).on);
+      push(start, GROUP.LEFT, main.on);
+      push(start, GROUP.RIGHT, alt.on);
+      push(start, 12, Math.max(1, Math.round(1 + m.A * 6 * (0.5 + 0.5 * sens))));
+      push(start, 13, Math.max(1, Math.round(1 + m.A * 6 * (0.5 + 0.5 * sens))));
+      if (sec.drop) {
+        for (const g of [GROUP.BACK, GROUP.RING, GROUP.CENTER, GROUP.LEFT, GROUP.RIGHT]) push(start, g, white.flash);
+        push(start, 9, 1);
+      }
+      // bar-level: calm sections breathe, loud ones spin
+      for (let k = sec.start; k < sec.end; k++) {
+        const bar = (((k - an.downbeat) % 4) + 4) % 4 === 0;
+        if (!bar) continue;
+        const bs = bsK(k);
+        if (F.hard < 0.4) { if (rng.chance(0.6 * amount)) push(bs, GROUP.RING, main.fade); }
+        else { push(bs, GROUP.RING, (((k - sec.start) / 4) % 2 === 0 ? main : alt).flash); if (m.A > 0.6) push(bs, 8, 1); }
+      }
+      if (!hasInst) return;
+      const busy = F.busy * amount * (0.5 + 0.5 * sens);
+      // kick
+      let last = -9;
+      for (const e of inSec(an.inst.kick, sec)) {
+        const bs = bsT(e.t);
+        if (e.s < 0.5 || bs - last < 0.5 || !rng.chance(busy)) continue;
+        last = bs;
+        push(bs, GROUP.CENTER, F.hard >= 0.5 ? main.flash : main.fade);
+        if (F.hard >= 0.9 && e.s > 0.8) push(bs, 9, 1);
+      }
+      // snare
+      last = -9;
+      for (const e of inSec(an.inst.snare, sec)) {
+        const bs = bsT(e.t);
+        if (e.s < 0.45 || bs - last < 0.5 || !rng.chance(busy)) continue;
+        last = bs;
+        push(bs, GROUP.BACK, F.hard >= 0.5 ? alt.flash : alt.fade);
+        if (F.hard >= 0.5) push(bs, GROUP.RING, alt.flash);
+      }
+      // hats: quick side lasers, only where the feeling is busy
+      if (F.busy >= 0.75) {
+        last = -9; let side = 0;
+        for (const e of inSec(an.inst.hat, sec)) {
+          const bs = bsT(e.t);
+          if (e.s < 0.55 || bs - last < 0.5 || !rng.chance(0.55 * busy)) continue;
+          last = bs; side ^= 1;
+          push(bs, side ? GROUP.LEFT : GROUP.RIGHT, (side ? alt : main).flash);
+        }
+      }
+      // lead: colour follows pitch
+      last = -9;
+      for (const e of inSec(an.inst.lead, sec)) {
+        const bs = bsT(e.t);
+        if (e.s < 0.6 || bs - last < 1 || !rng.chance(0.7 * busy * sens + 0.1)) continue;
+        last = bs;
+        const c = e.p < 0.4 ? LIGHT.RED : (e.p > 0.6 ? LIGHT.BLUE : LIGHT.WHITE);
+        push(bs, e.p < 0.5 ? GROUP.LEFT : GROUP.RIGHT, F.hard >= 0.5 ? c.flash : c.fade);
+      }
+    });
+
+    // build-ups and the dark beat before a drop
+    for (const b of mood.builds) {
+      const len = b.end - b.start;
+      for (let k = b.start; k < b.end - 1; k++) {
+        const j = k - b.start;
+        const n = j < len * 0.4 ? 1 : (j < len * 0.75 ? 2 : 4);
+        for (let i = 0; i < n; i++) {
+          const bs = bsK(k) + i / n;
+          const c = (i % 2 === 0 ? LIGHT.RED : LIGHT.BLUE);
+          push(bs, GROUP.RING, c.flash);
+          if (j >= len * 0.4) push(bs, GROUP.BACK, (i % 2 ? LIGHT.RED : LIGHT.BLUE).flash);
+        }
+      }
+      const dark = bsK(b.end - 1);
+      for (const g of [GROUP.BACK, GROUP.RING, GROUP.CENTER, GROUP.LEFT, GROUP.RIGHT]) push(dark, g, LIGHT.OFF);
+      push(dark, 12, 0); push(dark, 13, 0);
+    }
+    // keep the last word per light and moment (a blackout must beat an earlier flash)
+    const seen = new Map();
+    ev.forEach(function (e, i) { seen.set(e.type + '|' + Math.round(e.time * 1000), i); });
+    const out = ev.filter(function (e, i) { return seen.get(e.type + '|' + Math.round(e.time * 1000)) === i; });
+    out.sort(function (a, b) { return a.time - b.time; });
+    return out;
+  };
 })(BSM);
 
 ;
@@ -2587,6 +2810,39 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
     return { bars: lib.bars.length, groups: ls.groups.length };
   };
 
+  // ---- emotion layer ----
+  // Library groups are tinted and dimmed to match the song's feeling, accents follow the kick and snare, and the show
+  // builds, goes dark for a beat and detonates at drops. All of it reuses lights (group ids, filters, boxes) the learned show uses.
+  function tint(v, feel, A, sens, bld, rng) {
+    if (!v || v.b === undefined) return v;
+    const o = Object.assign({}, v);
+    if (o.b > 0) o.b = ns.clamp(o.b * (1 + sens * (A - 0.5) * 0.9), 0.05, 1);
+    if (o.c === 0 || o.c === 1) {
+      if (bld) {
+        if (rng() < sens * (0.3 + 0.5 * bld.progress)) { o.c = 2; o.b = Math.min(1, o.b * 1.15); }
+      } else if (rng() < 0.65 * sens) o.c = rng() < feel.color1 ? 1 : 0;
+    }
+    return o;
+  }
+  function accentKit(lib) {
+    const use = new Map();
+    for (const b of lib.bars) for (const g of b.g) if (g.t === 1) {
+      const u = use.get(g.g) || { n: 0, e: g.e[0] };
+      u.n += b.n; use.set(g.g, u);
+    }
+    const top = Array.from(use.entries()).sort(function (a, b) { return b[1].n - a[1].n; }).slice(0, 4);
+    if (!top.length) return null;
+    const tab = lib.tab;
+    return top.map(function (t) { return { g: t[0], f: tab.f[t[1].e[0]], x: tab.x[1][t[1].e[1]] }; });
+  }
+  function accent(kit, i, bs, list) {
+    const k = kit[i % kit.length];
+    return {
+      b: bs, g: k.g, t: 1,
+      e: [{ f: k.f, x: k.x, l: list.map(function (a) { return { b: a.o, v: { e: -1, p: a.p || 0, c: a.c, b: a.b, f: 0, sb: 0, sf: 0 } }; }) }]
+    };
+  }
+
   // -> { groups, boosts, basic } or null when the brain has no v4 lighting to draw on
   ns.planLights4 = function (an, cfg, brain, rng) {
     const lib = ns.normalizeBrain(brain).lightLib;
@@ -2597,6 +2853,9 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
     for (const g of lib.init) out.push(expand(lib, g, 0));
 
     const amount = cfg.lightAmount === undefined ? 1 : cfg.lightAmount;
+    const sens = cfg.lightMood === undefined ? 1 : cfg.lightMood;
+    const kit = an.inst ? accentKit(lib) : null;
+    ns.analyzeMood(an);
     const recent = [];
     let prevIds = new Set();
     const first = ((an.downbeat % 4) + 4) % 4;
@@ -2624,17 +2883,58 @@ var BSM = (typeof BSM !== 'undefined' && BSM) ? BSM : {};
       if (recent.length > 6) recent.shift();
       prevIds = idsOf(bar.g);
       const base = bsOf(k);
-      for (const g of bar.g) out.push(expand(lib, g, base + g.o));
+      const sm = ns.moodSectionAt(an, k), bld = ns.buildAt(an, k);
+      for (const g of bar.g) {
+        const x = expand(lib, g, base + g.o);
+        if (x.t === 1 && sens > 0) x.e = x.e.map(function (eb) {
+          return { f: eb.f, x: eb.x, l: eb.l.map(function (l) { return { b: l.b, v: tint(l.v, sm.feel, sm.mood.A, sens, bld, rng) }; }) };
+        });
+        out.push(x);
+      }
+      // accents on the kick and the snare (only where the music is lively)
+      if (kit && sens > 0 && sm.mood.A > 0.35) {
+        const t0 = an.phase + k * P, t1 = t0 + 4 * P;
+        let kc = 0, sc = 0;
+        for (const e of an.inst.kick) {
+          if (e.t < t0 || e.t >= t1 || e.s < 0.65 || kc >= 3 || rng() > 0.55 * sens * sm.feel.busy) continue;
+          kc++;
+          out.push(accent(kit, 0, e.t / P, [{ o: 0, c: sm.feel.main === 'RED' ? 0 : 1, b: 0.9 }, { o: 0.3, c: 0, b: 0, p: 1 }]));
+        }
+        for (const e of an.inst.snare) {
+          if (e.t < t0 || e.t >= t1 || e.s < 0.6 || sc >= 2 || rng() > 0.5 * sens * sm.feel.busy) continue;
+          sc++;
+          out.push(accent(kit, 1, e.t / P, [{ o: 0, c: sm.feel.alt === 'WHITE' ? 2 : (sm.feel.main === 'RED' ? 1 : 0), b: 1 }, { o: 0.25, c: 0, b: 0, p: 1 }]));
+        }
+      }
+      // rising flashes through the last bar before a drop
+      if (kit && sens > 0 && bld && bld.b.end - k <= 4 && bld.b.end - k > 0) {
+        const lead = bsOf(bld.b.end - 4);
+        for (let j = 0; j < 3; j++) {
+          const n = [1, 2, 4][j];
+          for (let i = 0; i < n; i++) out.push(accent(kit, 2 + (i % 2), lead + j + i / n, [{ o: 0, c: 2, b: 0.55 + 0.15 * j }, { o: 0.2 / n, c: 0, b: 0, p: 1 }]));
+        }
+      }
     }
 
-    // colour boost (the lights' alternate palette) while the music is at its loudest
+    // the beat before a drop goes dark, then everything lights white
+    let groups = out;
+    if (kit && sens > 0) {
+      const mood = ns.analyzeMood(an);
+      for (const b of mood.builds) {
+        const dark0 = bsOf(b.end - 1), dark1 = bsOf(b.end);
+        groups = groups.filter(function (g) { return !(g.b >= dark0 - 1e-6 && g.b < dark1 - 1e-6) || g.accent; });
+        for (let i = 0; i < Math.min(3, kit.length); i++) groups.push(accent(kit, i, dark1, [{ o: 0, c: 2, b: 1 }, { o: 1.5, c: 0, b: 0.3, p: 1 }]));
+      }
+    }
+    // colour boost (the lights' alternate palette) while the feeling is at its biggest
     const boosts = [];
     let on = false;
-    for (const s of an.sections) {
-      const want = s.level === 'high';
+    an.sections.forEach(function (s, i) {
+      const e = ns.analyzeMood(an).sections[i].emotion;
+      const want = s.level === 'high' || e === 'euphoric' || e === 'aggressive';
       if (want !== on) { boosts.push({ time: bsOf(s.start), on: want }); on = want; }
-    }
-    return { groups: out, boosts: boosts, basic: [] };
+    });
+    return { groups: groups, boosts: boosts, basic: [] };
   };
 })(BSM);
 
@@ -3352,6 +3652,12 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
     }).then(function () { setBusy(false); });
   }
 
+  function emotionArc(an) {
+    var m = BSM.analyzeMood(an), cnt = {}, order = [];
+    m.sections.forEach(function (s) { if (!cnt[s.emotion]) { cnt[s.emotion] = 0; order.push(s.emotion); } cnt[s.emotion]++; });
+    return order.map(function (e) { return cnt[e] + ' ' + e; }).join(', ') + (m.builds.length ? '; ' + m.builds.length + ' build-ups' : '');
+  }
+
   /* ---------- song facts ---------- */
   function renderSongInfo() {
     var an = S.an, box = $('songInfo');
@@ -3363,6 +3669,7 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
       '<div><dt>Beat lock</dt><dd>' + Math.round(an.tempoConfidence * 100) + '%</dd></div>' +
       '<div><dt>Sections</dt><dd>' + an.sections.length + '</dd></div>' +
       '<div><dt>Instruments sensed</dt><dd>' + an.inst.kick.length + ' kick, ' + an.inst.snare.length + ' snare, ' + an.inst.hat.length + ' hat, ' + an.inst.lead.length + ' lead</dd></div>' +
+      '<div><dt>Emotional arc</dt><dd>' + emotionArc(an) + '</dd></div>' +
       '<div><dt>Repeated bars</dt><dd>' + Math.round(an.study.linkedShare * 100) + '% of ' + an.study.bars + '</dd></div>';
   }
 
@@ -3421,6 +3728,8 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
       walls: num('walls') / 100,
       bombs: num('bombs') / 100,
       art: num('art') / 100,
+      lightAmount: num('lightAmount') / 100,
+      lightMood: num('lightMood') / 100,
       instruments: num('instruments') / 100,
       repeat: num('repeat') / 100,
       streams: num('streams') / 100,
@@ -3808,6 +4117,7 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
   }
 
   /* ---------- drawing: timeline ---------- */
+  var EMO_COL = { somber: '#3b4f9a', calm: '#4cc9f0', tense: '#b0476a', uplifting: '#5fd18a', aggressive: '#e5484d', euphoric: '#f0a030' };
   function drawTimeline() {
     var g = fit($('timeline'));
     var ctx = g.ctx, W = g.W, H = g.H;
@@ -3820,7 +4130,8 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
     an.sections.forEach(function (s, i) {
       var t0 = an.phase + s.start * an.period, t1 = an.phase + s.end * an.period;
       if (i % 2) { ctx.fillStyle = 'rgba(255,255,255,0.035)'; ctx.fillRect(x(t0), 0, x(t1) - x(t0), H); }
-      ctx.fillStyle = LEVEL_COL[s.level] || '#555';
+      var emo = BSM.analyzeMood(an).sections[i].emotion;
+      ctx.fillStyle = EMO_COL[emo] || LEVEL_COL[s.level] || '#555';
       ctx.fillRect(x(t0), H - 5, Math.max(1, x(t1) - x(t0) - 1), 5);
     });
     if (S.peaks) {
@@ -3957,6 +4268,8 @@ BSM.DEFAULT_BRAIN = {"format":"bsm-brain","version":2,"sources":[{"name":"Stamp 
      ['chaos', 'oChaos', function (v) { return v + '%'; }],
      ['walls', 'oWalls', function (v) { return v + '%'; }],
      ['bombs', 'oBombs', function (v) { return v + '%'; }],
+     ['lightAmount', 'oLightAmt', function (v) { return v + '%'; }],
+     ['lightMood', 'oLightMood', function (v) { return v + '%'; }],
      ['instruments', 'oInst', function (v) { return v + '%'; }],
      ['repeat', 'oRepeat', function (v) { return v + '%'; }],
      ['art', 'oArt', function (v) { return v + '%'; }],
