@@ -220,7 +220,8 @@
     // coefficient units here are 1/sqrt(M/2) of an orthonormal transform; keep the noise floors in the same absolute terms
     const q = { rho: q0.rho, base: q0.base * Math.sqrt(2 / M), end: q0.end };
     const nch = channels.length >= 2 ? 2 : 1;
-    const len = channels[0].length;
+    const pad = opts.padSamples || 0;                    // silence in front (a lead-in)
+    const len = channels[0].length + pad;
     const nBlocks = Math.ceil(len / M) + 1;
     const END = q.end - (q.end % PART);
     const nPart = END / PART;
@@ -239,7 +240,7 @@
     for (let b = 0; b < nBlocks; b++) {
       for (let c = 0; c < nch; c++) {
         const src = channels[c], start = (b - 1) * M;
-        for (let i = 0; i < N; i++) { const idx = start + i; buf[i] = (idx >= 0 && idx < len ? Math.max(-1, Math.min(1, src[idx])) : 0) * WIN[i]; }
+        for (let i = 0; i < N; i++) { const idx = start + i - pad; buf[i] = (idx >= 0 && idx < len - pad ? Math.max(-1, Math.min(1, src[idx])) : 0) * WIN[i]; }
         mdct(buf, coef);
         for (let p = 0; p < nPart; p++) {
           let s2 = 0;

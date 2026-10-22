@@ -68,6 +68,8 @@
       },
       // repeated music, repeated choreography: notes in a bar that sounds like an earlier bar
       rep: { total: 0, found: 0, exact: 0, sameHand: 0 },
+      // mined note sequences (see 32_patterns.js)
+      patterns: { list: [], seen: 0 },
       // legacy notes-per-second (used when a song has no usable onset rate)
       npb: { Easy: [0, 0], Normal: [0, 0], Hard: [0, 0], Expert: [0, 0], ExpertPlus: [0, 0] }
     };
@@ -154,6 +156,9 @@
         }
       }
     }
+
+    // ----- patterns -----
+    if (ns.minePatterns && diff && DIFFS.indexOf(diff) >= 2) ns.minePatterns(brain, notes, toB, diff);
 
     // ----- gameplay walls vs wall art -----
     const play = [], art = [];
@@ -476,6 +481,7 @@
       lightEvents: lightEvents,
       lightBars: b.lightLib.bars.length,
       lightShows: b.lightLib.maps,
+      patterns: b.patterns ? b.patterns.list.length : 0,
       repeatShare: b.rep && b.rep.total ? b.rep.exact / b.rep.total : 0,
       instNotes: b.inst ? ['kick', 'snare', 'hat', 'lead'].reduce(function (a, k) { return a + b.inst[k].n; }, 0) : 0,
       difficulties: DIFFS.filter(function (k) { return b.npo[k][0] > 0 || b.npb[k][1] > 0; })

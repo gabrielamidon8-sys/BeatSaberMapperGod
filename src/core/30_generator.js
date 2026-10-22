@@ -301,7 +301,9 @@
 
     // which beats are streams
     const stream = new Array(K).fill(false);
-    if (cfg.stream > 0 && 4 / P <= MAX_STREAM_NPS) {
+    const maxStream = cfg.speed ? 15 : MAX_STREAM_NPS;
+    const streamPer = cfg.speed && 4 / P < 7.5 ? 8 : 4;       // slow songs get 1/8-note bursts in speedcore
+    if (cfg.stream > 0 && streamPer / P <= maxStream) {
       let inRun = false;
       for (let k = 0; k < K; k++) {
         const e = an.beatEnergy[k];
@@ -312,6 +314,7 @@
         // a learned stream habit cannot override the music: sparse beats rarely become streams
         if (n <= 1) p = Math.min(p, 0.08); else if (n === 2) p = Math.min(p, 0.4);
         p *= cfg.stream;
+        if (cfg.speed && an.beatEnergy[k] >= 0.25) p = Math.max(p, n >= 2 ? 0.92 : 0.7);
         if (inRun && n >= 2) p = Math.min(1, p + 0.3);
         stream[k] = rng() < Math.min(1, p);
         inRun = stream[k];
@@ -322,10 +325,10 @@
       // never let streams alone overshoot the target; drop the least musical stream beats first
       let S = 0;
       const sb = [];
-      for (let k = 0; k < K; k++) if (stream[k]) { S += 4; sb.push(k); }
+      for (let k = 0; k < K; k++) if (stream[k]) { S += streamPer; sb.push(k); }
       if (S > 1.1 * hitTotal) {
         sb.sort(function (a, b) { return (onPer[a] + an.beatEnergy[a]) - (onPer[b] + an.beatEnergy[b]); });
-        for (const k of sb) { if (S <= 1.1 * hitTotal) break; stream[k] = false; S -= 4; }
+        for (const k of sb) { if (S <= 1.1 * hitTotal) break; stream[k] = false; S -= streamPer; }
       }
     }
     // A beat holds about as many hits as the music has onsets in it (real maps do this), never many more.
@@ -334,7 +337,7 @@
     let S = 0, R = 0;
     for (let k = 0; k < K; k++) {
       if (targets.perBeat[k] <= 0) continue;
-      if (stream[k]) S += 4; else R += Math.min(targets.perBeat[k] / (1 + cfg.chord), capOf(k));
+      if (stream[k]) S += streamPer; else R += Math.min(targets.perBeat[k] / (1 + cfg.chord), capOf(k));
     }
     const scale = R > 0 ? ns.clamp((hitTotal - S) / R, 0.2, 1.8) : 1;
 
@@ -346,7 +349,7 @@
       const isDown = (((k - an.downbeat) % 4) + 4) % 4 === 0;
       if (e < 0.04 || targets.perBeat[k] <= 0) continue;
       if (stream[k]) {
-        for (const s of [0, 6, 12, 18]) {
+        for (const s of (streamPer === 8 ? [0, 3, 6, 9, 12, 15, 18, 21] : [0, 6, 12, 18])) {
           const bs = (A + (k + s / SLOTS) * P) / P;
           const strength = ns.onsetAt(an, A + (k + s / SLOTS) * P, 0.025);
           hits.push({ k: k, s: s, bs: bs, strength: strength, e: e, down: isDown && s === 0, stream: true, first: s === 0 && !stream[k - 1] });
@@ -524,11 +527,119 @@
       hands[hand] = { lane: c.lane, layer: c.layer, dir: c.dir, beat: bs, v: v, h: h };
     };
 
+    // ----- patterns: motifs (learned and hand-written), accent combos (stacks, towers, windows ...), slider tails -----
+    const DI = { Easy: 0, Normal: 1, Hard: 2, Expert: 3, ExpertPlus: 4 };
+    const diffIdx = DI[cfg.difficulty];
+    const lib = cfg.lib || { combos: [], motifs: [] };
+    const T = cfg.tech === undefined ? 1 : cfg.tech;
+    const pMotif = diffIdx >= 3 ? ns.clamp(0.16 * T * T, 0, 0.8) : (diffIdx === 2 ? ns.clamp(0.07 * T * T, 0, 0.4) : 0);
+    const secStart = new Map();
+    for (const sc of an.sections) secStart.set(sc.start, sc);
     let lastHand = 1;
+    const transform = function (m, mir, shift) {
+      const mm = mir ? ns.mirrorMotif(m) : m;
+      return mm.map(function (mo) { return [mo[0], mo[1].map(function (n) { return [n[0], n[1] + shift, n[2], n[3]]; })]; });
+    };
+    // would these moments, placed on hits[hi..], be playable? (cells free, in reach, parity kept)
+    const dryRun = function (moments, hi) {
+      const sim = [Object.assign({}, hands[0]), Object.assign({}, hands[1])];
+      const taken = new Set();
+      for (let j = 0; j < moments.length; j++) {
+        const bs = hits[hi + j].bs;
+        for (const n of moments[j][1]) {
+          const c = n[0], lane = n[1], layer = n[2], dir = n[3];
+          if (lane < 0 || lane > 3) return false;
+          const tk = Math.round(bs * 48) + '|' + lane + '|' + layer;
+          if (taken.has(tk) || occupied(bs, lane, layer) || blocked(bs, lane, layer)) return false;
+          const H = sim[c], dt = bs - H.beat;
+          if (H.beat > -1e8) {
+            if (dt > 1e-6) {
+              if (Math.max(Math.abs(lane - H.lane), Math.abs(layer - H.layer)) > ns.allowedReach(dt, P)) return false;
+              if (breaksParity(H, dir, dt)) return false;
+            } else if (dir !== H.dir) return false;           // notes of one stack share a direction
+          }
+          taken.add(tk);
+          let v = VERT[dir], hh = HORIZ[dir];
+          if (dir === 8) { v = -H.v; hh = 0; }
+          sim[c] = { lane: lane, layer: layer, dir: dir, beat: bs, v: v, h: hh };
+        }
+      }
+      return true;
+    };
+    const commit = function (moments, hi) {
+      for (let j = 0; j < moments.length; j++) {
+        const bs = hits[hi + j].bs;
+        for (const n of moments[j][1]) place(n[0], bs, { lane: n[1], layer: n[2], dir: n[3] });
+        const cs = moments[j][1].map(function (n) { return n[0]; });
+        lastHand = cs.indexOf(0) >= 0 && cs.indexOf(1) >= 0 ? 1 : cs[cs.length - 1];
+      }
+    };
+    const motifTry = function (hi) {
+      const h0 = hits[hi];
+      if (h0.stream || pMotif <= 0 || rng() > pMotif) return 0;
+      const cand = [];
+      for (const m of lib.motifs) {
+        const L = m.m.length;
+        if (hi + L > hits.length) continue;
+        let ok = true;
+        for (let j = 0; j < L; j++) {
+          const hj = hits[hi + j];
+          if (hj.stream || Math.abs(hj.bs - h0.bs - m.m[j][0]) > 0.05) { ok = false; break; }
+        }
+        if (ok) cand.push(m);
+      }
+      for (let tries = 0; tries < 5 && cand.length; tries++) {
+        const w = cand.map(function (m) { return (0.4 + Math.sqrt(m.n)) * Math.exp((m.t - 0.35) * 2.4 * (T - 0.6)); });
+        const i = rng.weighted(w);
+        const m = cand.splice(i, 1)[0];
+        const mir = rng() < 0.5;
+        for (const shift of [0, rng() < 0.5 ? 1 : -1, 0]) {
+          const moments = transform(m.m, mir, shift);
+          if (dryRun(moments, hi)) { commit(moments, hi); return m.m.length; }
+        }
+      }
+      return 0;
+    };
+    const accentTry = function (hi) {
+      const h = hits[hi];
+      if (h.stream || !lib.combos.length || cfg.combo <= 0 || diffIdx < 2) return false;
+      let p = 0;
+      const sec = secStart.get(h.k);
+      if (sec && h.s === 0 && h.e > 0.4) p = sec.drop ? 0.7 : 0.3;
+      else if (h.inst === 'snare' && h.strength > 0.7 && h.e > 0.45) p = 0.12;
+      else if (h.down && h.e > 0.7) p = 0.05;
+      p *= cfg.combo * (diffIdx >= 3 ? 1 : 0.5);
+      if (p <= 0 || rng() > p) return false;
+      const bigOk = !!(sec && sec.drop);
+      const cands = lib.combos.filter(function (c) { return bigOk || (c.name !== 'tower' && c.name !== 'tower-pair'); });
+      for (let tries = 0; tries < 4 && cands.length; tries++) {
+        const c = cands.splice(rng.weighted(cands.map(function (x) { return x.w; })), 1)[0];
+        const mir = rng() < 0.5;
+        for (const shift of [0, 1, -1, 2, -2]) {
+          const moments = transform(c.m, mir, shift);
+          if (dryRun(moments, hi)) { commit(moments, hi); return true; }
+        }
+      }
+      return false;
+    };
+    const DX = [0, 0, -1, 1, -1, 1, -1, 1, 0], DY = [1, -1, 0, 0, 1, 1, -1, -1, 0];
+    // a quick second note a 1/8 beat later, one cell further along the swing
+    const sliderTail = function (hand, c, bs, hi, h) {
+      if (diffIdx < 3 || cfg.combo <= 0 || c.dir === 8) return;
+      if (rng() > 0.08 * cfg.combo * (0.6 + h.strength)) return;
+      const nx = hits[hi + 1];
+      const tb = bs + 0.125;
+      if (nx && nx.bs - tb < 0.45) return;
+      const lane = c.lane + DX[c.dir], layer = c.layer + DY[c.dir];
+      if (lane < 0 || lane > 3 || layer < 0 || layer > 2) return;
+      if (occupied(tb, lane, layer) || blocked(tb, lane, layer)) return;
+      place(hand, tb, { lane: lane, layer: layer, dir: c.dir });
+    };
     let mode = 'zigzag', modeUntil = -1e9;
     let skipped = 0;
     const modeList = [];
-    for (const h of hits) {
+    for (let hi = 0; hi < hits.length; hi++) {
+      const h = hits[hi];
       if (h.bs >= modeUntil) {
         const list = cfg.style === 'tech' ? ['tech', 'windmill', 'zigzag']
           : cfg.style === 'minimal' ? ['minimal', 'pillar', 'wave']
@@ -537,6 +648,11 @@
         mode = rng.pick(list);
         modeUntil = h.bs + 8 + rng.int(9);
         modeList.push(mode);
+      }
+      if (!h.stream) {
+        if (accentTry(hi)) continue;
+        const used = motifTry(hi);
+        if (used) { hi += used - 1; continue; }
       }
       if (h.stream) {
         // streams alternate hands strictly
@@ -584,6 +700,7 @@
       }
       place(useHand, h.bs, c);
       lastHand = useHand;
+      sliderTail(useHand, c, h.bs, hi, h);
     }
 
     const streamBeats = new Set();
@@ -704,7 +821,7 @@
       let prev = null;
       for (const n of notes) {
         if (n.color !== color) continue;
-        if (prev && n.time - prev.time <= 1.05) {
+        if (prev && n.time - prev.time <= 1.05 && n.time - prev.time > 0.2) {
           const a = VERT[prev.dir], b = VERT[n.dir];
           if (prev.dir !== 8 && n.dir !== 8 && a && b) { par++; if (a === b) brk++; }
         }
@@ -767,6 +884,9 @@
     if (an.onsetRate > 0) nps = (learnedNpo !== null ? learnedNpo : base.npo) * an.onsetRate;
     else nps = pri.npbFor(diff) || base.nps[0] * 1.5;
     nps = ns.clamp(nps, base.nps[0], base.nps[1]);
+    const style0 = options.style || 'balanced';
+    const speed = style0 === 'speedcore' && (diff === 'Expert' || diff === 'ExpertPlus');
+    if (speed) nps = ns.clamp(nps * 1.6, 7, 15);
 
     const learnedChord = pri.chordPerHit(diff);
     const style = options.style || 'balanced';
@@ -784,7 +904,10 @@
       wpm: base.wpm,
       crouch: base.crouch,
       art: mult(options.art),
-      stream: base.stream * mult(options.streams) * (style === 'minimal' ? 0 : style === 'flow' ? 0.6 : style === 'tech' ? 1.3 : 1),
+      stream: base.stream * mult(options.streams) * (style === 'minimal' ? 0 : style === 'flow' ? 0.6 : style === 'tech' ? 1.3 : speed ? 3 : 1),
+      speed: speed,
+      tech: (options.tech === undefined ? 1 : options.tech) * (style === 'tech' ? 1.8 : speed ? 0.6 : 1),
+      combo: options.combos === undefined ? 1 : options.combos,
       lights: options.lights === false ? false : true,
       lightAmount: options.lightAmount,
       chaos: options.chaos === undefined ? base.chaos : options.chaos,
@@ -798,6 +921,8 @@
     if (style === 'chaos') cfg.chaos = Math.max(cfg.chaos, 0.45);
     if (style === 'minimal') { cfg.walls *= 0.4; cfg.bombs *= 0.5; }
     if (style === 'tech') cfg.dot *= 2;
+    if (speed) { cfg.chord *= 0.4; cfg.bombs *= 0.5; cfg.walls *= 0.6; }
+    cfg.lib = ns.patternLibrary ? ns.patternLibrary(brain, diff) : null;
     cfg.plan = planTargets(an, cfg, pri);
 
     const baseSeed = (options.seed === undefined ? (Date.now() & 0x7fffffff) : options.seed) >>> 0;

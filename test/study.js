@@ -48,12 +48,13 @@ function studyMap(BSM, map, bpm, an) {
     for (let i = 1; i < l.length; i++) {
       const dt = l[i].time - l[i - 1].time;
       if (dt > 1.05) continue;
+      const slide = dt < 0.2;
       same++;
       if (l[i].dir === l[i - 1].dir && l[i].dir !== 8) sameDir++;
       if (l[i].lane === l[i - 1].lane && l[i].layer === l[i - 1].layer) sameCell++;
       const a = l[i - 1].dir, b = l[i].dir;
       const va = UPISH.has(a) ? 1 : DOWNISH.has(a) ? -1 : 0, vb = UPISH.has(b) ? 1 : DOWNISH.has(b) ? -1 : 0;
-      if (va && vb) { par++; if (va === vb) parBreak++; }
+      if (va && vb && !slide) { par++; if (va === vb) parBreak++; }
     }
   }
   out.parityBreakPct = +(100 * parBreak / Math.max(1, par)).toFixed(1);

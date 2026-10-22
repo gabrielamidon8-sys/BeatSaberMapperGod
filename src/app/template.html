@@ -237,6 +237,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
             <option value="balanced" selected>Balanced</option>
             <option value="flow">Flow (smooth sweeps)</option>
             <option value="tech">Tech (dots, windmills, jumps)</option>
+            <option value="speedcore">Speedcore (Expert / Expert+ streams)</option>
             <option value="minimal">Minimal (clean, sparse)</option>
             <option value="chaos">Chaos (more random)</option>
           </select>
@@ -282,6 +283,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <input type="range" id="repeat" min="0" max="150" value="100" step="5">
         </label>
         <label>
+          <span class="lbl">Tech level <output id="oTech"></output></span>
+          <input type="range" id="tech" min="0" max="200" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Combos <output id="oCombos"></output></span>
+          <input type="range" id="combos" min="0" max="200" value="100" step="5">
+        </label>
+        <label>
           <span class="lbl">Light amount <output id="oLightAmt"></output></span>
           <input type="range" id="lightAmount" min="20" max="150" value="100" step="5">
         </label>
@@ -320,6 +329,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
             <option value="high">Convert to .ogg, high quality (about 210 kbps)</option>
             <option value="small">Convert to .ogg, smaller file (about 140 kbps)</option>
             <option value="none">Leave the song out</option>
+          </select>
+        </label>
+        <label>
+          <span class="lbl">Lead-in for ChroMapper</span>
+          <select id="leadin">
+            <option value="1" selected>Small (about 1 second of silence first)</option>
+            <option value="2">Longer (about 2 seconds)</option>
+            <option value="0">None</option>
           </select>
         </label>
         <label>
@@ -582,6 +599,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       lightMood: num('lightMood') / 100,
       instruments: num('instruments') / 100,
       repeat: num('repeat') / 100,
+      tech: num('tech') / 100,
+      combos: num('combos') / 100,
       streams: num('streams') / 100,
       lights: $('lights').checked,
       candidates: parseInt($('candidates').value, 10)
@@ -600,6 +619,11 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     setTimeout(function () {
       try {
         var maps = {};
+        if ($('style').value === 'speedcore' && $('tempo').value === '1' && S.an.bpm < 135 && S.pcm) {
+          S.an = BSM.analyzeAudio(S.pcm.samples, S.pcm.sr, { tempoScale: 2 });
+          renderSongInfo();
+          log('Speedcore: reading the tempo double-time (' + S.an.bpm.toFixed(1) + ' BPM) so streams fit.', 'ok');
+        }
         picked.forEach(function (d) {
           var opts = readOpts(seed);
           opts.difficulty = d;
@@ -673,25 +697,31 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     }
     return false;
   }
-  function songOgg() {
+  function leadBeats() {
+    var sec = parseFloat($('leadin').value) || 0;
+    return sec > 0 ? Math.max(1, Math.ceil(sec / S.an.period - 1e-6)) : 0;
+  }
+  function songOgg(lead) {
     var mode = $('audioMode').value;
     if (mode === 'none') return Promise.resolve(null);
-    if (S.audioIsOgg && isVorbisOgg(S.audioBytes)) {
+    var padSec = lead * S.an.period;
+    if (!lead && S.audioIsOgg && isVorbisOgg(S.audioBytes)) {
       log('Kept your original .ogg as song.ogg (already Ogg Vorbis).', 'ok');
       var rate = new DataView(S.audioBytes.buffer, S.audioBytes.byteOffset).getUint32(40, true);
       return Promise.resolve({ bytes: S.audioBytes, rate: rate, count: Math.round(S.an.duration * rate) });
     }
-    if (S.oggCache && S.oggCache.mode === mode && S.oggCache.src === S.audioUrl) return Promise.resolve(S.oggCache.out);
+    if (S.oggCache && S.oggCache.mode === mode && S.oggCache.src === S.audioUrl && S.oggCache.lead === lead) return Promise.resolve(S.oggCache.out);
     if (!S.pcm || !S.pcm.buffer) { log('No decoded audio is available to convert. Load the song again.', 'warn'); return Promise.resolve(null); }
     setBusy(true, 'Converting the song to .ogg ...');
     return tick().then(function () {
       var buf = S.pcm.buffer, chans = [buf.getChannelData(0)];
       if (buf.numberOfChannels > 1) chans.push(buf.getChannelData(1));
       var t0 = Date.now();
-      var bytes = BSM.encodeOgg(chans, buf.sampleRate, { quality: mode, title: $('title').value.trim(), artist: $('artist').value.trim() });
+      var padSamples = Math.round(padSec * buf.sampleRate);
+      var bytes = BSM.encodeOgg(chans, buf.sampleRate, { quality: mode, title: $('title').value.trim(), artist: $('artist').value.trim(), padSamples: padSamples });
       log('Converted to song.ogg: ' + (bytes.length / 1048576).toFixed(1) + ' MB, ' + Math.round(bytes.length * 8 / buf.duration / 1000) + ' kbps, ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.', 'ok');
-      var out = { bytes: bytes, rate: buf.sampleRate, count: buf.length };
-      S.oggCache = { mode: mode, src: S.audioUrl, out: out };
+      var out = { bytes: bytes, rate: buf.sampleRate, count: buf.length + padSamples };
+      S.oggCache = { mode: mode, src: S.audioUrl, lead: lead, out: out };
       return out;
     }).catch(function (e) {
       log('Could not convert the song: ' + (e && e.message ? e.message : e), 'bad');
@@ -704,7 +734,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     if (!S.an || !picked.length) { log('Generate a difficulty first.', 'warn'); return; }
     var title = $('title').value.trim() || S.songName || 'Generated map';
     var maps = {};
-    picked.forEach(function (d) { maps[d] = S.maps[d].map; });
+    var lead = leadBeats();
+    picked.forEach(function (d) { maps[d] = BSM.shiftMap(S.maps[d].map, lead); });
     var fmt = $('format').value;
     var info = BSM.makeInfo({
       songName: title,
@@ -717,17 +748,17 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     });
     setBusy(true, 'Packing ' + safeName(title) + '.zip ...');
     return makeCover(title).then(function (cover) {
-      return songOgg().then(function (audio) { return { cover: cover, audio: audio }; });
+      return songOgg(lead).then(function (audio) { return { cover: cover, audio: audio }; });
     }).then(function (parts) {
       var cover = parts.cover, song = parts.audio, audio = song ? song.bytes : null;
       var rate = song ? song.rate : (S.pcm ? S.pcm.sr : 44100);
-      var count = song ? song.count : (S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * rate));
+      var count = song ? song.count : (S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * rate)) + Math.round(lead * S.an.period * rate);
       var zip = fmt === 'v4'
         ? BSM.buildMapZip({
             format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg',
             sampleCount: count,
             frequency: rate,
-            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration }
+            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration + lead * S.an.period }
           })
         : BSM.buildMapZip({ info: info, maps: maps, audio: audio, cover: cover });
       if (!audio) log('song.ogg is not in the zip. Add it to the folder before loading the map in game.', 'warn');
@@ -788,43 +819,64 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     return { c: col, I: I };
   }
 
-  function drawLights(ctx, groups, bsNow, W, H, horizonY) {
+  /* ---------- visualizer state ---------- */
+  var FX = { parts: [], lastIdx: -1, lastT: 0, shake: 0, flash: 0, trail: { 0: [], 1: [] }, saber: { 0: null, 1: null }, comboPop: 0, lastCombo: 0, tun: 0, pulse: 0 };
+  function fxReset() { FX.parts.length = 0; FX.lastIdx = -1; FX.trail[0].length = 0; FX.trail[1].length = 0; FX.lastCombo = 0; }
+  function mix(a, b, k) { return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]; }
+  function hexRgb(h) { var n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+  function envAt(an, name, t) {
+    var e = an.instEnv && an.instEnv[name]; if (!e) return 0;
+    var f = Math.round(t * an.fps); if (f < 0 || f >= e.length) return 0;
+    var m = 0; for (var k = Math.max(0, f - 2); k <= Math.min(e.length - 1, f + 1); k++) if (e[k] > m) m = e[k];
+    return m > 1 ? 1 : m;
+  }
+  function curEmotion(an, t) {
+    var mood = BSM.analyzeMood(an), k = Math.floor((t - an.phase) / an.period);
+    for (var i = 0; i < an.sections.length; i++) if (k >= an.sections[i].start && k < an.sections[i].end) return mood.sections[i].emotion;
+    return 'calm';
+  }
+
+  function drawLights(ctx, groups, bsNow, W, H, horizonY, theme) {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     var ring = lightAt(groups[1], bsNow);
     if (ring) {
-      var rg = ctx.createRadialGradient(W / 2, horizonY, 0, W / 2, horizonY, W * 0.7);
-      rg.addColorStop(0, rgba(ring.c, 0.34 * ring.I));
+      var rg = ctx.createRadialGradient(W / 2, horizonY, 0, W / 2, horizonY, W * 0.8);
+      rg.addColorStop(0, rgba(ring.c, 0.42 * ring.I));
+      rg.addColorStop(0.5, rgba(ring.c, 0.12 * ring.I));
       rg.addColorStop(1, rgba(ring.c, 0));
       ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
     }
     var back = lightAt(groups[0], bsNow);
     if (back) {
-      ctx.strokeStyle = rgba(back.c, 0.6 * back.I); ctx.lineWidth = 2;
-      for (var i = -3; i <= 3; i++) {
-        ctx.beginPath(); ctx.moveTo(W / 2, horizonY); ctx.lineTo(W / 2 + i * W * 0.2, H); ctx.stroke();
+      ctx.lineCap = 'round';
+      for (var i = -5; i <= 5; i++) {
+        var ang = i * 0.17 + Math.sin(bsNow * 0.5 + i) * 0.04;
+        var x2 = W / 2 + Math.sin(ang) * H * 1.2, y2 = horizonY + Math.cos(ang) * H * 1.2;
+        ctx.strokeStyle = rgba(back.c, 0.16 * back.I); ctx.lineWidth = 9;
+        ctx.beginPath(); ctx.moveTo(W / 2, horizonY); ctx.lineTo(x2, y2); ctx.stroke();
+        ctx.strokeStyle = rgba(back.c, 0.75 * back.I); ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.moveTo(W / 2, horizonY); ctx.lineTo(x2, y2); ctx.stroke();
       }
     }
-    var left = lightAt(groups[2], bsNow);
-    if (left) {
-      ctx.strokeStyle = rgba(left.c, 0.7 * left.I); ctx.lineWidth = 2.5;
-      for (var j = 0; j < 3; j++) {
-        ctx.beginPath(); ctx.moveTo(0, H * (0.2 + j * 0.2)); ctx.lineTo(W / 2, horizonY); ctx.stroke();
+    [[2, 0], [3, W]].forEach(function (g) {
+      var L = lightAt(groups[g[0]], bsNow);
+      if (!L) return;
+      ctx.lineCap = 'round';
+      for (var j = 0; j < 4; j++) {
+        var y0 = H * (0.08 + j * 0.17), sw = Math.sin(bsNow * 0.7 + j * 1.3) * 0.04 * H;
+        ctx.strokeStyle = rgba(L.c, 0.2 * L.I); ctx.lineWidth = 8;
+        ctx.beginPath(); ctx.moveTo(g[1], y0); ctx.lineTo(W / 2 + (g[1] ? 1 : -1) * W * 0.04, horizonY + sw); ctx.stroke();
+        ctx.strokeStyle = rgba(L.c, 0.85 * L.I); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(g[1], y0); ctx.lineTo(W / 2 + (g[1] ? 1 : -1) * W * 0.04, horizonY + sw); ctx.stroke();
       }
-    }
-    var right = lightAt(groups[3], bsNow);
-    if (right) {
-      ctx.strokeStyle = rgba(right.c, 0.7 * right.I); ctx.lineWidth = 2.5;
-      for (var k = 0; k < 3; k++) {
-        ctx.beginPath(); ctx.moveTo(W, H * (0.2 + k * 0.2)); ctx.lineTo(W / 2, horizonY); ctx.stroke();
-      }
-    }
+    });
     var center = lightAt(groups[4], bsNow);
     if (center) {
-      var cg = ctx.createLinearGradient(0, H, 0, H * 0.45);
-      cg.addColorStop(0, rgba(center.c, 0.42 * center.I));
+      var cg = ctx.createLinearGradient(0, H, 0, H * 0.4);
+      cg.addColorStop(0, rgba(center.c, 0.55 * center.I));
       cg.addColorStop(1, rgba(center.c, 0));
-      ctx.fillStyle = cg; ctx.fillRect(0, H * 0.45, W, H * 0.55);
+      ctx.fillStyle = cg; ctx.fillRect(0, H * 0.4, W, H * 0.6);
     }
     ctx.restore();
   }
@@ -843,17 +895,21 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
   function drawTrack() {
     var g = fit($('track'));
     var ctx = g.ctx, W = g.W, H = g.H;
-    ctx.fillStyle = '#07090e';
-    ctx.fillRect(0, 0, W, H);
     var an = S.an;
+    ctx.fillStyle = '#05070c';
+    ctx.fillRect(0, 0, W, H);
     if (!an) {
-      ctx.fillStyle = '#7d8599'; ctx.font = '15px ' + 'system-ui, sans-serif'; ctx.textAlign = 'center';
+      var bg0 = ctx.createRadialGradient(W / 2, H * 0.45, 0, W / 2, H * 0.45, W * 0.7);
+      bg0.addColorStop(0, 'rgba(124,92,255,0.25)'); bg0.addColorStop(1, 'rgba(124,92,255,0)');
+      ctx.fillStyle = bg0; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#9aa3bd'; ctx.font = '600 15px system-ui, sans-serif'; ctx.textAlign = 'center';
       ctx.fillText('Drop a song to start', W / 2, H / 2);
       return;
     }
     var entry = S.maps[S.preview];
     var P = an.period;
     var t = $('player').currentTime || 0;
+    var playing = !$('player').paused;
     var bsNow = t / P;
     var hitY = H * 0.86, horizonY = H * 0.1;
     var cell = Math.min(W / 5.4, 124);
@@ -864,16 +920,68 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       return { x: W / 2 + (lane - 1.5) * cell * s, y: yb(s) - (layer + 0.5) * cell * 0.92 * s, s: s };
     };
 
+    // live audio reaction
+    var kick = envAt(an, 'kick', t), snare = envAt(an, 'snare', t), hat = envAt(an, 'hat', t), lead = envAt(an, 'lead', t);
+    var emo = curEmotion(an, t), ecol = hexRgb(EMO_COL[emo] || '#6b7490');
+    var dt = Math.min(0.1, Math.max(0, t - FX.lastT)); if (Math.abs(t - FX.lastT) > 0.5) fxReset();
+    FX.lastT = t;
+    FX.shake = Math.max(FX.shake * 0.86, playing ? kick : 0);
+    FX.pulse = Math.max(FX.pulse * 0.9, playing ? (kick * 0.8 + snare * 0.5) : 0);
+    var beatPh = bsNow - Math.floor(bsNow);
+    var beatPulse = Math.pow(1 - beatPh, 3);
+    if (playing) FX.tun += dt * (0.6 + FX.pulse);
+
+    ctx.save();
+    var sh = FX.shake * (W < 500 ? 3 : 5);
+    if (sh > 0.2) ctx.translate((Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh);
+
+    // sky tinted by the section's emotion
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    var dk = mix([5, 7, 12], ecol, 0.16 + 0.1 * FX.pulse);
+    sky.addColorStop(0, rgba(dk, 1)); sky.addColorStop(0.55, rgba(mix([5, 7, 12], ecol, 0.07), 1)); sky.addColorStop(1, '#05070c');
+    ctx.fillStyle = sky; ctx.fillRect(-10, -10, W + 20, H + 20);
+    // horizon glow
+    var hg = ctx.createRadialGradient(W / 2, horizonY, 0, W / 2, horizonY, W * 0.6);
+    hg.addColorStop(0, rgba(ecol, 0.45 + 0.35 * FX.pulse)); hg.addColorStop(1, rgba(ecol, 0));
+    ctx.fillStyle = hg; ctx.fillRect(0, 0, W, H);
+
     if (entry) drawLights(ctx, entryPrep(entry).groups, bsNow, W, H, horizonY);
 
-    // perspective lane lines and the hit-plane grid
+    // tunnel rings flying at the player
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (var r = 0; r < 9; r++) {
+      var z = ((r / 9 + FX.tun * 0.35) % 1);
+      var s2 = Math.pow(z, 2.2), rad = (0.06 + s2 * 1.4) * W * 0.5;
+      var cy = horizonY + (hitY - horizonY) * 0.55 * s2 - 0 ;
+      ctx.strokeStyle = rgba(ecol, (0.05 + 0.5 * s2) * (0.4 + 0.6 * beatPulse + FX.pulse * 0.4));
+      ctx.lineWidth = 1 + s2 * 3;
+      ctx.beginPath(); ctx.ellipse(W / 2, cy, rad, rad * 0.55, 0, Math.PI, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+
+    // floor: perspective grid + glow + mirrored light
+    var fl = ctx.createLinearGradient(0, horizonY, 0, H);
+    fl.addColorStop(0, rgba(ecol, 0)); fl.addColorStop(1, rgba(ecol, 0.14 + 0.2 * FX.pulse));
+    ctx.fillStyle = fl; ctx.fillRect(0, horizonY, W, H - horizonY);
     ctx.strokeStyle = 'rgba(160,172,200,0.16)'; ctx.lineWidth = 1;
     var far = sc(LOOK);
     for (var e = 0; e <= 4; e++) {
       var xn = W / 2 + (e - 2) * cell;
       ctx.beginPath(); ctx.moveTo(xn, hitY); ctx.lineTo(W / 2 + (e - 2) * cell * far, yb(far)); ctx.stroke();
     }
-    ctx.strokeStyle = 'rgba(190,200,225,0.34)';
+    for (var gb = 0; gb < LOOK * 2; gb++) {      // beat lines on the floor
+      var bD = Math.ceil(bsNow * 2) / 2 + gb / 2 - bsNow;
+      if (bD > LOOK) break;
+      var sb = sc(bD), yy = yb(sb);
+      var bar = Math.round((bsNow + bD) * 2) % 8 === 0;
+      ctx.strokeStyle = bar ? rgba(ecol, 0.55) : 'rgba(160,172,200,0.12)';
+      ctx.lineWidth = bar ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(W / 2 - 2 * cell * sb, yy); ctx.lineTo(W / 2 + 2 * cell * sb, yy); ctx.stroke();
+    }
+    // hit plane frame
+    ctx.strokeStyle = 'rgba(200,210,235,' + (0.3 + 0.4 * beatPulse) + ')';
+    ctx.lineWidth = 1.5;
     for (var l = 0; l <= 3; l++) {
       var yl = hitY - l * cell * 0.92;
       ctx.beginPath(); ctx.moveTo(W / 2 - 2 * cell, yl); ctx.lineTo(W / 2 + 2 * cell, yl); ctx.stroke();
@@ -884,9 +992,10 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     }
 
     if (!entry) {
-      ctx.fillStyle = '#7d8599'; ctx.font = '15px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = '#9aa3bd'; ctx.font = '600 15px system-ui, sans-serif'; ctx.textAlign = 'center';
       ctx.fillText('Generate a difficulty to see it here', W / 2, H * 0.42);
-      drawHud(ctx, W, H, an, bsNow, null);
+      ctx.restore();
+      drawHud(ctx, W, H, an, bsNow, null, { kick: kick, snare: snare, hat: hat, lead: lead, emo: emo, ecol: ecol });
       return;
     }
 
@@ -910,19 +1019,22 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
         yBotF = yb(f) - 2 * cell * 0.92 * f; yBotB = yb(b) - 2 * cell * 0.92 * b;
         yTopF = yb(f) - 3 * cell * 0.92 * f; yTopB = yb(b) - 3 * cell * 0.92 * b;
       }
-      ctx.fillStyle = rgba(RGB.wall, 0.42);
+      ctx.fillStyle = rgba(RGB.wall, 0.34);
       ctx.beginPath();
       ctx.moveTo(xl[0], yTopF); ctx.lineTo(xr[0], yTopF); ctx.lineTo(xr[1], yTopB); ctx.lineTo(xl[1], yTopB);
       ctx.closePath(); ctx.fill();
-      ctx.fillStyle = rgba(RGB.wall, 0.22);
+      ctx.fillStyle = rgba(RGB.wall, 0.2);
       ctx.beginPath();
       ctx.moveTo(xl[0], yTopF); ctx.lineTo(xr[0], yTopF); ctx.lineTo(xr[0], yBotF); ctx.lineTo(xl[0], yBotF);
       ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = rgba(RGB.wall, 0.9); ctx.lineWidth = 1.5;
+      ctx.strokeRect(Math.min(xl[0], xr[0]), yTopF, Math.abs(xr[0] - xl[0]), yBotF - yTopF);
     }
 
     // notes, far first so near ones sit on top
     var i0 = lowerBound(m.notes, bsNow - 0.2);
     var i1 = lowerBound(m.notes, bsNow + LOOK + 0.001);
+    // stacks/links: faint connector between simultaneous notes of one colour
     for (var ni = i1 - 1; ni >= i0; ni--) {
       var n = m.notes[ni];
       var D = n.time - bsNow;
@@ -930,18 +1042,34 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       var p = proj(n.lane, n.layer, D);
       var size = cell * 0.8 * p.s;
       var c = n.color === 0 ? RGB.red : RGB.blue;
-      ctx.globalAlpha = D < 0 ? Math.max(0, 1 + D / 0.2) : 1;
-      if (Math.abs(D) < 0.05) { ctx.shadowColor = rgba(c, 0.9); ctx.shadowBlur = 22; }
-      ctx.fillStyle = rgba(c, 0.92);
-      ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
-      ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = Math.max(1, size * 0.04);
-      ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
-      ctx.fillStyle = 'rgba(12,12,18,0.9)'; ctx.strokeStyle = 'rgba(12,12,18,0.9)';
+      var near = Math.abs(D) < 0.12;
+      ctx.globalAlpha = (D < 0 ? Math.max(0, 1 + D / 0.2) : 1) * Math.min(1, (LOOK - D) / 1.2);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      var halo = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * (near ? 1.6 : 1.15));
+      halo.addColorStop(0, rgba(c, near ? 0.6 : 0.3)); halo.addColorStop(1, rgba(c, 0));
+      ctx.fillStyle = halo; ctx.fillRect(p.x - size * 2, p.y - size * 2, size * 4, size * 4);
+      ctx.restore();
+      var grad = ctx.createLinearGradient(p.x, p.y - size / 2, p.x, p.y + size / 2);
+      grad.addColorStop(0, rgba(mix(c, [255, 255, 255], 0.35), 1)); grad.addColorStop(1, rgba(mix(c, [0, 0, 0], 0.25), 1));
+      ctx.fillStyle = grad;
+      var rd = size * 0.14;
+      ctx.beginPath();
+      ctx.moveTo(p.x - size / 2 + rd, p.y - size / 2); ctx.lineTo(p.x + size / 2 - rd, p.y - size / 2);
+      ctx.quadraticCurveTo(p.x + size / 2, p.y - size / 2, p.x + size / 2, p.y - size / 2 + rd);
+      ctx.lineTo(p.x + size / 2, p.y + size / 2 - rd);
+      ctx.quadraticCurveTo(p.x + size / 2, p.y + size / 2, p.x + size / 2 - rd, p.y + size / 2);
+      ctx.lineTo(p.x - size / 2 + rd, p.y + size / 2);
+      ctx.quadraticCurveTo(p.x - size / 2, p.y + size / 2, p.x - size / 2, p.y + size / 2 - rd);
+      ctx.lineTo(p.x - size / 2, p.y - size / 2 + rd);
+      ctx.quadraticCurveTo(p.x - size / 2, p.y - size / 2, p.x - size / 2 + rd, p.y - size / 2);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = Math.max(1, size * 0.045); ctx.stroke();
+      ctx.fillStyle = 'rgba(12,12,18,0.92)'; ctx.strokeStyle = 'rgba(12,12,18,0.92)';
       if (n.dir === 8) {
         ctx.beginPath(); ctx.arc(p.x, p.y, size * 0.2, 0, Math.PI * 2); ctx.fill();
       } else {
-        ctx.lineWidth = Math.max(1.5, size * 0.09);
+        ctx.lineWidth = Math.max(1.5, size * 0.1); ctx.lineCap = 'round';
         drawArrow(ctx, p.x, p.y, n.dir, size * 0.3);
       }
       ctx.globalAlpha = 1;
@@ -955,6 +1083,9 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       var pb = proj(bo.lane, bo.layer, Db);
       var rb = cell * 0.3 * pb.s;
       ctx.globalAlpha = Db < 0 ? Math.max(0, 1 + Db / 0.2) : 1;
+      var bgl = ctx.createRadialGradient(pb.x, pb.y, 0, pb.x, pb.y, rb * 1.8);
+      bgl.addColorStop(0, 'rgba(255,60,60,0.35)'); bgl.addColorStop(1, 'rgba(255,60,60,0)');
+      ctx.fillStyle = bgl; ctx.fillRect(pb.x - rb * 2, pb.y - rb * 2, rb * 4, rb * 4);
       ctx.fillStyle = '#0d0e13';
       ctx.beginPath(); ctx.arc(pb.x, pb.y, rb, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = Math.max(1, rb * 0.12);
@@ -965,7 +1096,84 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       ctx.globalAlpha = 1;
     }
 
-    drawHud(ctx, W, H, an, bsNow, entry);
+    // simulated player: sabers swing to the next note of each colour, leaving trails
+    var idxNow = lowerBound(m.notes, bsNow);
+    [0, 1].forEach(function (hand) {
+      var nxt = null;
+      for (var q = Math.max(0, lowerBound(m.notes, bsNow - 0.06)); q < m.notes.length && m.notes[q].time - bsNow < 1.2; q++) {
+        if (m.notes[q].color === hand) { nxt = m.notes[q]; break; }
+      }
+      var rest = { x: W / 2 + (hand ? 1.3 : -1.3) * cell, y: hitY - 0.3 * cell };
+      var tgt = rest;
+      if (nxt) {
+        var Dn = nxt.time - bsNow, pt = proj(nxt.lane, nxt.layer, 0);
+        var v = nxt.dir < 8 ? VEC[nxt.dir] : [0, 0];
+        var k = Math.max(0, Math.min(1, 1 - Dn / 0.5));
+        var sx = pt.x + v[0] * cell * 0.55, sy = pt.y + v[1] * cell * 0.55;   // swing start (opposite cut direction)
+        var ex = pt.x - v[0] * cell * 0.45, ey = pt.y - v[1] * cell * 0.45;
+        if (k < 0.6) { var a = k / 0.6; tgt = { x: rest.x + (sx - rest.x) * a, y: rest.y + (sy - rest.y) * a }; }
+        else { var b2 = (k - 0.6) / 0.4; tgt = { x: sx + (ex - sx) * b2, y: sy + (ey - sy) * b2 }; }
+      }
+      var cur = FX.saber[hand] || tgt;
+      cur = { x: cur.x + (tgt.x - cur.x) * 0.5, y: cur.y + (tgt.y - cur.y) * 0.5 };
+      FX.saber[hand] = cur;
+      var tr = FX.trail[hand];
+      if (playing) { tr.push({ x: cur.x, y: cur.y }); if (tr.length > 12) tr.shift(); } else if (tr.length) tr.shift();
+      var col = hand ? RGB.blue : RGB.red;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round';
+      for (var ti = 1; ti < tr.length; ti++) {
+        ctx.strokeStyle = rgba(col, ti / tr.length * 0.5); ctx.lineWidth = cell * 0.12 * ti / tr.length;
+        ctx.beginPath(); ctx.moveTo(tr[ti - 1].x, tr[ti - 1].y); ctx.lineTo(tr[ti].x, tr[ti].y); ctx.stroke();
+      }
+      var bx = hand ? W * 0.9 : W * 0.1;
+      ctx.strokeStyle = rgba(col, 0.25); ctx.lineWidth = cell * 0.16;
+      ctx.beginPath(); ctx.moveTo(bx, H + 10); ctx.lineTo(cur.x, cur.y); ctx.stroke();
+      ctx.strokeStyle = rgba(mix(col, [255, 255, 255], 0.7), 0.95); ctx.lineWidth = cell * 0.045;
+      ctx.beginPath(); ctx.moveTo(bx, H + 10); ctx.lineTo(cur.x, cur.y); ctx.stroke();
+      ctx.restore();
+    });
+
+    // hits: sparks, combo counter
+    if (FX.lastIdx < 0 || idxNow < FX.lastIdx || idxNow - FX.lastIdx > 40) FX.lastIdx = idxNow;
+    if (playing) {
+      for (var hi = FX.lastIdx; hi < idxNow; hi++) {
+        var hn = m.notes[hi], hp = proj(hn.lane, hn.layer, 0), hc = hn.color === 0 ? RGB.red : RGB.blue;
+        var cnt = W < 500 ? 7 : 12, vv = hn.dir < 8 ? VEC[hn.dir] : [0, 0];
+        for (var q2 = 0; q2 < cnt; q2++) {
+          var an2 = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 220;
+          FX.parts.push({ x: hp.x, y: hp.y, vx: Math.cos(an2) * sp - vv[0] * 90, vy: Math.sin(an2) * sp - vv[1] * 90 - 40, life: 1, c: hc, s: 1 + Math.random() * 2.5 });
+        }
+        FX.parts.push({ x: hp.x, y: hp.y, vx: 0, vy: 0, life: 1, c: hc, s: 0, ring: true });
+        FX.flash = Math.min(1, FX.flash + 0.25);
+      }
+    }
+    FX.lastIdx = idxNow;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (var pi = FX.parts.length - 1; pi >= 0; pi--) {
+      var pt2 = FX.parts[pi];
+      pt2.life -= (pt2.ring ? 3.2 : 2.2) * (dt || 0.016);
+      if (pt2.life <= 0) { FX.parts.splice(pi, 1); continue; }
+      if (pt2.ring) {
+        ctx.strokeStyle = rgba(pt2.c, pt2.life * 0.8); ctx.lineWidth = 2.5 * pt2.life;
+        ctx.beginPath(); ctx.arc(pt2.x, pt2.y, cell * 0.2 + (1 - pt2.life) * cell * 0.55, 0, Math.PI * 2); ctx.stroke();
+        continue;
+      }
+      pt2.x += pt2.vx * (dt || 0.016); pt2.y += pt2.vy * (dt || 0.016); pt2.vy += 260 * (dt || 0.016);
+      ctx.fillStyle = rgba(mix(pt2.c, [255, 255, 255], 0.4), pt2.life);
+      ctx.beginPath(); ctx.arc(pt2.x, pt2.y, pt2.s * (0.5 + pt2.life), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    if (FX.parts.length > 400) FX.parts.splice(0, FX.parts.length - 400);
+
+    // edge vignette / hit flash
+    FX.flash *= 0.9;
+    var vg = ctx.createRadialGradient(W / 2, H * 0.5, Math.min(W, H) * 0.35, W / 2, H * 0.5, Math.max(W, H) * 0.75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = vg; ctx.fillRect(-10, -10, W + 20, H + 20);
+    if (FX.flash > 0.02) { ctx.fillStyle = rgba(ecol, FX.flash * 0.08); ctx.fillRect(-10, -10, W + 20, H + 20); }
+    ctx.restore();
+
+    drawHud(ctx, W, H, an, bsNow, entry, { kick: kick, snare: snare, hat: hat, lead: lead, emo: emo, ecol: ecol, combo: idxNow, hitY: hitY });
   }
 
   function entryPrep(entry) {
@@ -985,7 +1193,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     return null;
   }
 
-  function drawHud(ctx, W, H, an, bsNow, entry) {
+  function drawHud(ctx, W, H, an, bsNow, entry, fx) {
     var t = bsNow * an.period;
     var sec = sectionAt(an, t);
     var bar = Math.floor(bsNow / 4) + 1;
@@ -997,11 +1205,47 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     ctx.textAlign = 'left';
     ctx.font = '500 12px ui-monospace, Menlo, Consolas, monospace';
     ctx.fillStyle = 'rgba(214,220,236,0.92)';
-    ctx.fillText('beat ' + bsNow.toFixed(1) + '   bar ' + bar + '   ' + (sec ? sec.level + (sec.drop ? ' drop' : '') : ''), 12, 20);
+    ctx.fillText('beat ' + bsNow.toFixed(1) + '  bar ' + bar + '  ' + (sec ? sec.level + (sec.drop ? ' DROP' : '') : ''), 12, 20);
+    // emotion tag
+    ctx.fillStyle = rgba(fx.ecol, 0.95); ctx.fillText(fx.emo.toUpperCase(), 12, 36);
     if (entry) {
       ctx.textAlign = 'right';
-      ctx.fillText(LABEL[entry.meta.difficulty] + '   ' + nps.toFixed(1) + ' notes/s', W - 12, 20);
+      ctx.fillStyle = 'rgba(214,220,236,0.92)';
+      ctx.fillText(LABEL[entry.meta.difficulty] + '  ' + nps.toFixed(1) + ' notes/s', W - 12, 20);
     }
+    // instrument meters (right side)
+    var names = [['kick', fx.kick], ['snare', fx.snare], ['hat', fx.hat], ['lead', fx.lead]];
+    var mx = W - 14, my = 34, mh = 34;
+    ctx.textAlign = 'right'; ctx.font = '500 9px ui-monospace, Menlo, monospace';
+    names.forEach(function (nv, i) {
+      var x = mx - (3 - i) * 20;
+      ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fillRect(x - 12, my, 12, mh);
+      ctx.fillStyle = rgba(mix(fx.ecol, [255, 255, 255], 0.3), 0.95);
+      var hh = mh * Math.min(1, nv[1]); ctx.fillRect(x - 12, my + mh - hh, 12, hh);
+      ctx.fillStyle = 'rgba(214,220,236,0.7)'; ctx.fillText(nv[0].slice(0, 2).toUpperCase(), x, my + mh + 11);
+    });
+    if (!entry || fx.combo === undefined) return;
+    // combo + multiplier ring (bottom-left of the play area)
+    var combo = fx.combo;
+    var mult = combo >= 14 ? 8 : combo >= 6 ? 4 : combo >= 2 ? 2 : 1;
+    var nextAt = mult === 1 ? 2 : mult === 2 ? 6 : mult === 4 ? 14 : 30, prevAt = mult === 1 ? 0 : mult === 2 ? 2 : mult === 4 ? 6 : 14;
+    var prog = mult === 8 ? ((combo % 8) / 8) : (combo - prevAt) / (nextAt - prevAt);
+    if (combo !== FX.lastCombo) { FX.comboPop = 1; FX.lastCombo = combo; }
+    FX.comboPop *= 0.88;
+    var cx = 44, cy = H - 52, R = 24;
+    ctx.save();
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = rgba(mix(fx.ecol, [255, 255, 255], 0.2), 1);
+    ctx.beginPath(); ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, prog)); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '700 15px system-ui, sans-serif';
+    ctx.fillText('x' + mult, cx, cy + 5);
+    ctx.font = '800 ' + Math.round(26 + 10 * FX.comboPop) + 'px system-ui, sans-serif';
+    ctx.textAlign = 'left'; ctx.shadowColor = rgba(fx.ecol, 0.9); ctx.shadowBlur = 14;
+    ctx.fillText(String(combo), cx + R + 12, cy + 4);
+    ctx.shadowBlur = 0; ctx.font = '600 10px ui-monospace, Menlo, monospace'; ctx.fillStyle = 'rgba(214,220,236,0.75)';
+    ctx.fillText('COMBO', cx + R + 12, cy + 18);
+    ctx.restore();
   }
 
   /* ---------- drawing: timeline ---------- */
@@ -1159,6 +1403,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
      ['lightAmount', 'oLightAmt', function (v) { return v + '%'; }],
      ['lightMood', 'oLightMood', function (v) { return v + '%'; }],
      ['instruments', 'oInst', function (v) { return v + '%'; }],
+     ['tech', 'oTech', function (v) { return v + '%'; }],
+     ['combos', 'oCombos', function (v) { return v + '%'; }],
      ['repeat', 'oRepeat', function (v) { return v + '%'; }],
      ['art', 'oArt', function (v) { return v + '%'; }],
      ['streams', 'oStreams', function (v) { return v + '%'; }]].forEach(function (c) {

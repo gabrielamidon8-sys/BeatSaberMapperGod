@@ -196,7 +196,15 @@
       const list = map.notes.filter(function (n) { return n.color === color; });
       for (let i = 1; i < list.length; i++) {
         const dt = list[i].time - list[i - 1].time;
-        if (cellDist(list[i], list[i - 1]) > allowedReach(dt, period)) reachViolations++;
+        if (cellDist(list[i], list[i - 1]) > allowedReach(dt, period)) {
+          // stacks / towers (same beat, one line) and sliders (a quick second note one cell along the same swing) are one swing
+          const a = list[i - 1], b = list[i];
+          const same = a.dir === b.dir && a.dir !== 8;
+          const inLine = a.lane === b.lane || a.layer === b.layer || (Math.abs(a.lane - b.lane) === Math.abs(a.layer - b.layer));
+          if (same && dt < 0.01 && cellDist(a, b) <= 2 && inLine) continue;
+          if (same && dt <= 0.2 && cellDist(a, b) <= 1) continue;
+          reachViolations++;
+        }
       }
     }
     if (reachViolations) warnings.push(reachViolations + ' fast same-hand moves (reach)');
@@ -224,6 +232,23 @@
     return { errors: errors, warnings: warnings, reachViolations: reachViolations, wallHits: wallHits, bombHits: bombHits };
   }
   ns.validateMap = validateMap;
+
+  // Everything later by a whole number of beats (a silent lead-in, for editors like ChroMapper that need a moment before beat 0).
+  ns.shiftMap = function (map, beats) {
+    if (!beats) return map;
+    const mv = function (o) { return Object.assign({}, o, { time: o.time + beats }); };
+    const out = Object.assign({}, map, {
+      notes: map.notes.map(mv), bombs: map.bombs.map(mv), walls: map.walls.map(mv), events: map.events.map(mv)
+    });
+    if (map.lights4) {
+      out.lights4 = {
+        groups: map.lights4.groups.map(function (g) { return Object.assign({}, g, { b: g.b + beats }); }),
+        boosts: map.lights4.boosts.map(mv),
+        basic: (map.lights4.basic || []).map(mv)
+      };
+    }
+    return out;
+  };
 
   // ---------- statistics ----------
   function mapStats(map, bpm) {
