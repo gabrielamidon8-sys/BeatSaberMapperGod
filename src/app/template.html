@@ -314,6 +314,15 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       <p class="hint" id="saveNote">Checking whether this view can save files.</p>
       <div class="fields">
         <label>
+          <span class="lbl">Song file in the zip</span>
+          <select id="audioMode">
+            <option value="balanced" selected>Convert to .ogg, balanced (about 180 kbps)</option>
+            <option value="high">Convert to .ogg, high quality (about 210 kbps)</option>
+            <option value="small">Convert to .ogg, smaller file (about 140 kbps)</option>
+            <option value="none">Leave the song out</option>
+          </select>
+        </label>
+        <label>
           <span class="lbl">Map format</span>
           <select id="format">
             <option value="v2" selected>Classic (v2, widest support)</option>
@@ -449,7 +458,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
         var d = buf.getChannelData(c);
         for (var i = 0; i < n; i++) mono[i] += d[i] / ch;
       }
-      return { samples: mono, sr: buf.sampleRate };
+      return { samples: mono, sr: buf.sampleRate, buffer: buf };
     });
   }
 
@@ -484,7 +493,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
             $('btnGenerate').disabled = false;
             $('btnReroll').disabled = false;
             log('Loaded ' + S.songName + ': ' + an.bpm.toFixed(2) + ' BPM, ' + an.sections.length + ' sections, ' + fmtTime(an.duration) + '.', 'ok');
-            if (!S.audioIsOgg) log('Beat Saber plays OGG. Export a map zip without audio, or convert the song first: ffmpeg -i song.mp3 -c:a libvorbis -q:a 6 song.ogg', 'warn');
+            if (!S.audioIsOgg) log('Beat Saber plays Ogg Vorbis, so the song is converted to song.ogg when you export.', 'ok');
           });
         });
       });
@@ -656,6 +665,40 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     });
   }
 
+  // Beat Saber needs Ogg Vorbis. An uploaded .ogg that is already Vorbis goes in untouched; anything else is encoded here.
+  function isVorbisOgg(bytes) {
+    if (!bytes || bytes.length < 40 || bytes[0] !== 0x4f || bytes[1] !== 0x67 || bytes[2] !== 0x67 || bytes[3] !== 0x53) return false;
+    for (var i = 27; i < 120 && i + 6 < bytes.length; i++) {
+      if (bytes[i] === 1 && bytes[i + 1] === 0x76 && bytes[i + 2] === 0x6f && bytes[i + 3] === 0x72 && bytes[i + 4] === 0x62) return true;
+    }
+    return false;
+  }
+  function songOgg() {
+    var mode = $('audioMode').value;
+    if (mode === 'none') return Promise.resolve(null);
+    if (S.audioIsOgg && isVorbisOgg(S.audioBytes)) {
+      log('Kept your original .ogg as song.ogg (already Ogg Vorbis).', 'ok');
+      var rate = new DataView(S.audioBytes.buffer, S.audioBytes.byteOffset).getUint32(40, true);
+      return Promise.resolve({ bytes: S.audioBytes, rate: rate, count: Math.round(S.an.duration * rate) });
+    }
+    if (S.oggCache && S.oggCache.mode === mode && S.oggCache.src === S.audioUrl) return Promise.resolve(S.oggCache.out);
+    if (!S.pcm || !S.pcm.buffer) { log('No decoded audio is available to convert. Load the song again.', 'warn'); return Promise.resolve(null); }
+    setBusy(true, 'Converting the song to .ogg ...');
+    return tick().then(function () {
+      var buf = S.pcm.buffer, chans = [buf.getChannelData(0)];
+      if (buf.numberOfChannels > 1) chans.push(buf.getChannelData(1));
+      var t0 = Date.now();
+      var bytes = BSM.encodeOgg(chans, buf.sampleRate, { quality: mode, title: $('title').value.trim(), artist: $('artist').value.trim() });
+      log('Converted to song.ogg: ' + (bytes.length / 1048576).toFixed(1) + ' MB, ' + Math.round(bytes.length * 8 / buf.duration / 1000) + ' kbps, ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.', 'ok');
+      var out = { bytes: bytes, rate: buf.sampleRate, count: buf.length };
+      S.oggCache = { mode: mode, src: S.audioUrl, out: out };
+      return out;
+    }).catch(function (e) {
+      log('Could not convert the song: ' + (e && e.message ? e.message : e), 'bad');
+      return null;
+    });
+  }
+
   function exportMapZip() {
     var picked = BSM.DIFFICULTIES.filter(function (d) { return S.maps[d]; });
     if (!S.an || !picked.length) { log('Generate a difficulty first.', 'warn'); return; }
@@ -674,16 +717,20 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     });
     setBusy(true, 'Packing ' + safeName(title) + '.zip ...');
     return makeCover(title).then(function (cover) {
-      var audio = S.audioIsOgg ? S.audioBytes : null;
+      return songOgg().then(function (audio) { return { cover: cover, audio: audio }; });
+    }).then(function (parts) {
+      var cover = parts.cover, song = parts.audio, audio = song ? song.bytes : null;
+      var rate = song ? song.rate : (S.pcm ? S.pcm.sr : 44100);
+      var count = song ? song.count : (S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * rate));
       var zip = fmt === 'v4'
         ? BSM.buildMapZip({
             format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg',
-            sampleCount: S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * 44100),
-            frequency: S.pcm ? S.pcm.sr : 44100,
+            sampleCount: count,
+            frequency: rate,
             meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration }
           })
         : BSM.buildMapZip({ info: info, maps: maps, audio: audio, cover: cover });
-      if (!audio) log('song.ogg is not in the zip (the upload was not OGG). Add it to the folder before loading the map in game.', 'warn');
+      if (!audio) log('song.ogg is not in the zip. Add it to the folder before loading the map in game.', 'warn');
       return saveFile(safeName(title) + '.zip', zip);
     }).then(function () { setBusy(false); });
   }
