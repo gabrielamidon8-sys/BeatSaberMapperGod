@@ -1,0 +1,1151 @@
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>BeatForge Generative Mapper</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout concept: two working columns (inputs left, stage and results right) that stack on phones.
+   Palette: a graphite workbench with the two Beat Saber saber colours as the only loud hues. */
+:root {
+  --bg: #f2f3f6;
+  --panel: #ffffff;
+  --ink: #161a24;
+  --muted: #5b6377;
+  --line: #d9deea;
+  --accent: #e0a017;
+  --accent-ink: #1c1400;
+  --red: #d8323f;
+  --blue: #2a6fdc;
+  --ok: #17794f;
+  --warn: #9a5a06;
+  --bad: #b02a33;
+  --stage: #07090e;
+  --display: "Chakra Petch", "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c0e14;
+    --panel: #151922;
+    --ink: #e8ecf5;
+    --muted: #98a1b7;
+    --line: #272f40;
+    --accent: #ffbf3f;
+    --accent-ink: #1a1200;
+    --red: #ff6470;
+    --blue: #5ba6ff;
+    --ok: #3ccf91;
+    --warn: #ffb547;
+    --bad: #ff7d86;
+    --stage: #07090e;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c0e14;
+  --panel: #151922;
+  --ink: #e8ecf5;
+  --muted: #98a1b7;
+  --line: #272f40;
+  --accent: #ffbf3f;
+  --accent-ink: #1a1200;
+  --red: #ff6470;
+  --blue: #5ba6ff;
+  --ok: #3ccf91;
+  --warn: #ffb547;
+  --bad: #ff7d86;
+  --stage: #07090e;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+  padding-top: 20px;
+  padding-bottom: 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3 { font-family: var(--display); letter-spacing: 0.01em; margin: 0; text-wrap: balance; }
+h1 { font-size: 30px; font-weight: 700; line-height: 1.1; }
+h2 { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+p { margin: 0; }
+.muted, .hint { color: var(--muted); font-size: 13px; }
+.hint { margin-bottom: 10px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* masthead */
+.masthead { margin-bottom: 18px; max-width: 760px; }
+.brand { display: flex; gap: 14px; align-items: flex-start; }
+.sabers { display: flex; gap: 4px; padding-top: 6px; flex: none; }
+.sabers .s { display: block; width: 6px; height: 40px; border-radius: 3px; }
+.sabers .red { background: var(--red); }
+.sabers .blue { background: var(--blue); }
+.lede { color: var(--muted); margin-top: 6px; max-width: 58ch; }
+
+/* layout */
+.layout { display: grid; gap: 16px; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); align-items: start; }
+.col-controls, .col-stage { display: grid; gap: 16px; min-width: 0; }
+@media (max-width: 880px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+.step {
+  display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-ink); font: 600 12px/1 var(--mono);
+}
+
+/* drop zones */
+.drop {
+  display: grid; gap: 2px; place-items: center; text-align: center; cursor: pointer;
+  border: 1.5px dashed var(--line); border-radius: 8px; padding: 14px 12px; margin-bottom: 10px;
+}
+.drop:hover, .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.drop-title { font-weight: 600; }
+.drop-sub { color: var(--muted); font-size: 13px; }
+
+/* facts */
+.facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.facts div { border-top: 1px solid var(--line); padding-top: 6px; }
+.facts dt { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+.facts dd { margin: 0; font: 500 15px/1.3 var(--mono); font-variant-numeric: tabular-nums; }
+.brain { font-size: 13px; color: var(--muted); margin: 10px 0; }
+
+/* buttons */
+.row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.btn {
+  appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  font: 600 14px/1 var(--body); padding: 10px 14px; border-radius: 8px; cursor: pointer; min-height: 40px;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn[hidden] { display: none !important; }
+label.btn { display: inline-flex; align-items: center; }
+
+/* chips */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.chip {
+  appearance: none; font: 500 13px/1 var(--body); padding: 8px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: transparent; color: var(--ink); min-height: 36px;
+}
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+
+/* fields */
+.fields { display: grid; gap: 12px; }
+.fields label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.fields label > span.lbl { display: flex; justify-content: space-between; align-items: baseline; }
+.fields output { font: 500 13px var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; }
+select, input[type="text"], input[type="number"], input:not([type]), textarea {
+  font: 14px var(--body); color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px 10px; min-height: 38px; width: 100%;
+}
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+.fields .check { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 14px; }
+.fields .check input { width: 18px; height: 18px; accent-color: var(--accent); }
+details { margin-top: 12px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details .fields { margin-top: 10px; }
+
+/* stage */
+.stage { margin: 0; background: var(--stage); border-radius: 10px; overflow: hidden; border: 1px solid var(--line); position: relative; }
+#track { display: block; width: 100%; height: clamp(250px, 46vw, 400px); }
+.hud-note { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 12px; font: 12px/1.3 var(--mono); color: #aeb6c8; background: linear-gradient(transparent, rgba(0,0,0,.55)); pointer-events: none; }
+#timeline { display: block; width: 100%; height: 104px; background: var(--stage); border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+audio { width: 100%; min-width: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+
+/* status */
+.status { font-size: 14px; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 16%, var(--panel)); border: 1px solid var(--accent); }
+.status[hidden] { display: none; }
+
+/* stats */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 8px; }
+.stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; min-width: 0; }
+.stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+.stat .v { font: 600 22px/1.15 var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat .s { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.tbl-wrap { overflow-x: auto; margin-top: 14px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+td .pill { font: 500 12px/1 var(--mono); padding: 4px 6px; border-radius: 4px; }
+.pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.pill.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+tr.current td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+td button { appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 6px 10px; font: 13px var(--body); cursor: pointer; min-height: 32px; }
+
+/* log */
+.log { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow: auto; font: 12.5px/1.5 var(--mono); }
+.log li { padding: 4px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; color: var(--muted); }
+.log li.ok { color: var(--ok); }
+.log li.warn { color: var(--warn); }
+.log li.bad { color: var(--bad); }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<header class="masthead">
+  <div class="brand">
+    <div class="sabers" aria-hidden="true"><span class="s red"></span><span class="s blue"></span></div>
+    <div>
+      <h1>BeatForge</h1>
+      <p class="lede">Drop in a song and BeatForge builds a Beat Saber map that follows it: notes, bombs, walls and lights. It learns from the maps you give it.</p>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col-controls" aria-label="Inputs">
+    <article class="panel">
+      <h2><span class="step">1</span>Song</h2>
+      <input type="file" id="fileSong" accept="audio/*,.ogg,.mp3,.wav,.m4a" hidden>
+      <div class="drop" id="dropSong">
+        <span class="drop-title">Drop a song or choose a file</span>
+        <span class="drop-sub">MP3, OGG, WAV or M4A, up to about 10 minutes</span>
+      </div>
+      <dl class="facts" id="songInfo" hidden></dl>
+    </article>
+
+    <article class="panel">
+      <h2><span class="step">2</span>Learn from maps</h2>
+      <p class="hint">Add Beat Saber map .zip files. BeatForge reads their flow, rhythm, density, walls, bombs and lights, and adds them to what it knows. Each file adds to the last one.</p>
+      <input type="file" id="fileLearn" accept=".zip,application/zip" multiple hidden>
+      <div class="drop" id="dropLearn">
+        <span class="drop-title">Add map .zip files</span>
+        <span class="drop-sub">Include the song.ogg in the zip to learn energy-aware density</span>
+      </div>
+      <p class="brain" id="brainSummary" aria-live="polite"></p>
+      <div class="row">
+        <label class="btn" id="lblBrainImport">Load brain file<input type="file" id="fileBrain" accept=".json,application/json" hidden></label>
+        <button class="btn" id="btnBrainExport" type="button" hidden>Save brain file</button>
+        <button class="btn" id="btnBrainReset" type="button">Reset brain</button>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2><span class="step">3</span>Generate</h2>
+      <div class="chips" id="chips" role="group" aria-label="Difficulties to generate"></div>
+      <div class="fields">
+        <label>
+          <span class="lbl">Style</span>
+          <select id="style">
+            <option value="balanced" selected>Balanced</option>
+            <option value="flow">Flow (smooth sweeps)</option>
+            <option value="tech">Tech (dots, windmills, jumps)</option>
+            <option value="minimal">Minimal (clean, sparse)</option>
+            <option value="chaos">Chaos (more random)</option>
+          </select>
+        </label>
+        <label>
+          <span class="lbl">Density <output id="oDensity"></output></span>
+          <input type="range" id="density" min="50" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Variety <output id="oChaos"></output></span>
+          <input type="range" id="chaos" min="0" max="50" value="15" step="1">
+        </label>
+        <label>
+          <span class="lbl">Walls <output id="oWalls"></output></span>
+          <input type="range" id="walls" min="0" max="200" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Bombs <output id="oBombs"></output></span>
+          <input type="range" id="bombs" min="0" max="200" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Wall art <output id="oArt"></output></span>
+          <input type="range" id="art" min="0" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Streams <output id="oStreams"></output></span>
+          <input type="range" id="streams" min="0" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Tempo reading</span>
+          <select id="tempo">
+            <option value="1" selected>Auto</option>
+            <option value="2">Double (x2)</option>
+            <option value="0.5">Half (/2)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="lights" checked>Lighting events</label>
+        <label>
+          <span class="lbl">Seed</span>
+          <input type="text" id="seed" inputmode="numeric" placeholder="random" autocomplete="off">
+        </label>
+        <label>
+          <span class="lbl">Candidates tried per difficulty</span>
+          <select id="candidates">
+            <option value="1">1 (fastest)</option>
+            <option value="4" selected>4</option>
+            <option value="8">8 (best of more)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="btnGenerate" type="button" disabled>Generate</button>
+        <button class="btn" id="btnReroll" type="button" disabled>New seed</button>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>Export</h2>
+      <p class="hint" id="saveNote">Checking whether this view can save files.</p>
+      <div class="fields">
+        <label>
+          <span class="lbl">Map format</span>
+          <select id="format">
+            <option value="v2" selected>Classic (v2, widest support)</option>
+            <option value="v4">Modern (v4, with learned light show)</option>
+          </select>
+        </label>
+      </div>
+      <details>
+        <summary>Map details</summary>
+        <div class="fields" style="margin-top:10px">
+          <label><span class="lbl">Title</span><input type="text" id="title" maxlength="120"></label>
+          <label><span class="lbl">Artist</span><input type="text" id="artist" maxlength="120"></label>
+          <label><span class="lbl">Mapper name</span><input type="text" id="mapper" maxlength="60" value="BeatForge"></label>
+        </div>
+      </details>
+      <div class="row">
+        <button class="btn primary" id="btnExport" type="button" disabled hidden>Download map .zip</button>
+      </div>
+    </article>
+  </section>
+
+  <section class="col-stage" aria-label="Preview">
+    <figure class="stage">
+      <canvas id="track" role="img" aria-label="Perspective preview of the generated map"></canvas>
+      <figcaption class="hud-note" id="hud" hidden></figcaption>
+    </figure>
+    <audio id="player" controls preload="metadata"></audio>
+    <canvas id="timeline" aria-label="Timeline: click to seek"></canvas>
+    <div class="legend" aria-hidden="true">
+      <span><i style="background:var(--red)"></i>Red saber</span>
+      <span><i style="background:var(--blue)"></i>Blue saber</span>
+      <span><i style="background:#8f6fe8"></i>Wall</span>
+      <span><i style="background:#c9ced9"></i>Bomb</span>
+      <span><i style="background:#e0a017"></i>Playhead</span>
+    </div>
+    <div class="status" id="status" role="status" hidden></div>
+
+    <section class="panel" aria-labelledby="hPreview">
+      <h2 id="hPreview">Preview</h2>
+      <div class="stats" id="stats"><p class="muted">Drop a song, then generate a difficulty to see its stats here.</p></div>
+      <div class="tbl-wrap"><table id="diffTable" aria-label="Generated difficulties"></table></div>
+    </section>
+
+    <section class="panel" aria-labelledby="hLog">
+      <h2 id="hLog">Log</h2>
+      <ol class="log" id="log" aria-live="polite"></ol>
+    </section>
+  </section>
+</main>
+
+<script>
+/*__CORE__*/
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var LABEL = { Easy: 'Easy', Normal: 'Normal', Hard: 'Hard', Expert: 'Expert', ExpertPlus: 'Expert+' };
+  var DIFFS = BSM.DIFFICULTIES;
+  var STORE_KEY = 'beatforge-brain-v1';
+  var LOOK = 6;           // beats of look-ahead on the track
+  var DEPTH = 0.2;        // perspective strength
+  var RGB = { red: [255, 70, 85], blue: [60, 140, 255], white: [255, 255, 255], wall: [143, 111, 232] };
+  var VEC = [[0, -1], [0, 1], [-1, 0], [1, 0], [-0.707, -0.707], [0.707, -0.707], [-0.707, 0.707], [0.707, 0.707]];
+  var LEVEL_COL = { low: '#3b4357', mid: '#6b7490', high: '#c4822a' };
+
+  var S = {
+    an: null, peaks: null, songName: '', audioBytes: null, audioIsOgg: false, audioUrl: '',
+    brain: null, maps: {}, preview: '', picked: { Expert: true, ExpertPlus: true }
+  };
+  var DL = null;          // downloads capability, resolved at start
+  var actx = null;
+  var resetArmed = false;
+
+  /* ---------- small helpers ---------- */
+  function rgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + Math.max(0, Math.min(1, a)).toFixed(3) + ')'; }
+  function tick() { return new Promise(function (r) { setTimeout(r, 30); }); }
+  function fmtTime(sec) {
+    if (!isFinite(sec)) return '0:00';
+    var m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  function num(id) { return parseFloat($(id).value); }
+  function setBusy(on, msg) {
+    var box = $('status');
+    box.textContent = msg || '';
+    box.hidden = !on;
+  }
+  function log(msg, kind) {
+    var li = document.createElement('li');
+    li.className = kind || '';
+    var t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    li.textContent = t + '  ' + msg;
+    var ol = $('log');
+    ol.insertBefore(li, ol.firstChild);
+    while (ol.children.length > 80) ol.removeChild(ol.lastChild);
+  }
+  function safeName(s) {
+    var n = String(s || 'map').replace(/[\\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return (n || 'map').slice(0, 80);
+  }
+
+  // The drawing code binary-searches these arrays by time, so keep them ordered.
+  function sortMap(m) {
+    var byTime = function (a, b) { return a.time - b.time; };
+    m.notes.sort(byTime);
+    m.bombs.sort(byTime);
+    m.walls.sort(byTime);
+    m.events.sort(byTime);
+  }
+
+  /* ---------- audio in and out ---------- */
+  function decodeAudio(input) {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return Promise.reject(new Error('This browser has no Web Audio support.'));
+    if (!actx) actx = new Ctx();
+    var ab = input instanceof ArrayBuffer ? input.slice(0) : input.slice().buffer;
+    return actx.decodeAudioData(ab).then(function (buf) {
+      var n = buf.length, ch = buf.numberOfChannels, mono = new Float32Array(n);
+      for (var c = 0; c < ch; c++) {
+        var d = buf.getChannelData(c);
+        for (var i = 0; i < n; i++) mono[i] += d[i] / ch;
+      }
+      return { samples: mono, sr: buf.sampleRate };
+    });
+  }
+
+  function inflateRaw(bytes) {
+    if (typeof DecompressionStream === 'undefined') return Promise.reject(new Error('This browser cannot open compressed zip files.'));
+    var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Response(stream).arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+  }
+
+  function loadSong(file) {
+    setBusy(true, 'Decoding ' + file.name + ' ...');
+    return file.arrayBuffer().then(function (buf) {
+      return decodeAudio(buf).then(function (pcm) {
+        return tick().then(function () {
+          setBusy(true, 'Finding beats, tempo and sections ...');
+          return tick().then(function () {
+            S.pcm = pcm;
+            var an = BSM.analyzeAudio(pcm.samples, pcm.sr, { tempoScale: parseFloat($('tempo').value) || 1 });
+            S.an = an;
+            S.peaks = BSM.waveformPeaks(pcm.samples, 1600);
+            S.audioBytes = new Uint8Array(buf);
+            S.audioIsOgg = /\.ogg$/i.test(file.name) || file.type === 'audio/ogg';
+            S.songName = file.name.replace(/\.[^.]+$/, '');
+            $('title').value = S.songName;
+            if (S.audioUrl) URL.revokeObjectURL(S.audioUrl);
+            S.audioUrl = URL.createObjectURL(file);
+            $('player').src = S.audioUrl;
+            S.maps = {};
+            S.preview = '';
+            renderSongInfo();
+            renderAll();
+            $('btnGenerate').disabled = false;
+            $('btnReroll').disabled = false;
+            log('Loaded ' + S.songName + ': ' + an.bpm.toFixed(2) + ' BPM, ' + an.sections.length + ' sections, ' + fmtTime(an.duration) + '.', 'ok');
+            if (!S.audioIsOgg) log('Beat Saber plays OGG. Export a map zip without audio, or convert the song first: ffmpeg -i song.mp3 -c:a libvorbis -q:a 6 song.ogg', 'warn');
+          });
+        });
+      });
+    }).catch(function (e) {
+      log('Could not read that audio: ' + (e && e.message ? e.message : e), 'bad');
+    }).then(function () { setBusy(false); });
+  }
+
+  /* ---------- song facts ---------- */
+  function renderSongInfo() {
+    var an = S.an, box = $('songInfo');
+    if (!an) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.innerHTML =
+      '<div><dt>Tempo</dt><dd>' + an.bpm.toFixed(2) + ' BPM</dd></div>' +
+      '<div><dt>Length</dt><dd>' + fmtTime(an.duration) + '</dd></div>' +
+      '<div><dt>Beat lock</dt><dd>' + Math.round(an.tempoConfidence * 100) + '%</dd></div>' +
+      '<div><dt>Sections</dt><dd>' + an.sections.length + '</dd></div>';
+  }
+
+  /* ---------- the brain ---------- */
+  function cloneDefault() { return BSM.normalizeBrain(JSON.parse(JSON.stringify(BSM.DEFAULT_BRAIN))); }
+  function loadBrain() {
+    try {
+      var raw = window.localStorage.getItem(STORE_KEY);
+      if (raw) return BSM.normalizeBrain(JSON.parse(raw));
+    } catch (e) { /* storage blocked or corrupt: fall back to the built-in brain */ }
+    return cloneDefault();
+  }
+  function saveBrain() {
+    try { window.localStorage.setItem(STORE_KEY, JSON.stringify(S.brain)); } catch (e) { /* per-viewer convenience only */ }
+  }
+  function updateBrainSummary() {
+    var s = BSM.summarizeBrain(S.brain);
+    $('brainSummary').textContent =
+      s.maps + ' map' + (s.maps === 1 ? '' : 's') + ' learned, ' + s.notes + ' notes, ' +
+      s.swingTransitions + ' swing transitions, ' + s.walls + ' walls, ' + s.artWalls + ' wall-art pieces, ' + s.lightBars + ' light-show bars' +
+      (s.beatsWithAudio ? ', ' + s.withAudio + ' with audio' : '') + '.';
+  }
+
+  function learnFiles(files) {
+    var list = Array.prototype.slice.call(files);
+    var run = Promise.resolve();
+    list.forEach(function (f) {
+      run = run.then(function () {
+        setBusy(true, 'Learning from ' + f.name + ' ...');
+        return f.arrayBuffer().then(function (ab) {
+          return BSM.learnFromZip(new Uint8Array(ab), S.brain, { inflateRaw: inflateRaw, decodeAudio: decodeAudio });
+        }).then(function (rep) {
+          log('Learned ' + rep.songName + ' (' + rep.difficulties.join(', ') + '; ' + rep.notes + ' notes' + (rep.withAudio ? ', with audio' : ', no audio') + (rep.lightShows ? ', ' + rep.lightShows + ' light show' : '') + (rep.artWalls ? ', ' + rep.artWalls + ' wall-art pieces' : '') + (rep.detectedBpm && Math.abs(rep.detectedBpm - rep.bpm) > 1 ? '; tempo read as ' + rep.detectedBpm.toFixed(1) + ' BPM' : '') + ').', 'ok');
+        }).catch(function (e) {
+          log(f.name + ': ' + (e && e.message ? e.message : e), 'bad');
+        });
+      });
+    });
+    return run.then(function () {
+      saveBrain();
+      updateBrainSummary();
+      setBusy(false);
+    });
+  }
+
+  /* ---------- generation ---------- */
+  function readOpts(seed) {
+    return {
+      seed: seed,
+      style: $('style').value,
+      density: num('density') / 100,
+      chaos: num('chaos') / 100,
+      walls: num('walls') / 100,
+      bombs: num('bombs') / 100,
+      art: num('art') / 100,
+      streams: num('streams') / 100,
+      lights: $('lights').checked,
+      candidates: parseInt($('candidates').value, 10)
+    };
+  }
+
+  function generate(newSeed) {
+    if (!S.an) return;
+    var picked = BSM.DIFFICULTIES.filter(function (d) { return S.picked[d]; });
+    if (!picked.length) { log('Choose at least one difficulty.', 'warn'); return; }
+    var seedBox = $('seed');
+    var seed = parseInt(seedBox.value, 10);
+    if (newSeed || !isFinite(seed)) seed = Math.floor(Math.random() * 2147483646) + 1;
+    seedBox.value = String(seed);
+    setBusy(true, 'Mapping ' + picked.map(function (d) { return LABEL[d]; }).join(', ') + ' ...');
+    setTimeout(function () {
+      try {
+        var maps = {};
+        picked.forEach(function (d) {
+          var opts = readOpts(seed);
+          opts.difficulty = d;
+          maps[d] = BSM.generateMap(S.an, opts, S.brain);
+          sortMap(maps[d].map);
+        });
+        S.maps = maps;
+        S.preview = picked[picked.length - 1];
+        renderAll();
+        picked.forEach(function (d) {
+          var st = maps[d].meta.stats, v = maps[d].meta.validation;
+          log(LABEL[d] + ': ' + st.notes + ' notes, ' + st.nps.toFixed(2) + ' per second, ' + st.bombs + ' bombs, ' + st.walls + ' walls, check ' +
+            (v.errors.length === 0 && v.reachViolations === 0 ? 'passed' : 'needs review') + ' (seed ' + seed + ').', 'ok');
+        });
+      } catch (e) {
+        log('Generation failed: ' + (e && e.message ? e.message : e), 'bad');
+      }
+      setBusy(false);
+    }, 30);
+  }
+
+  /* ---------- export ---------- */
+  function makeCover(title) {
+    var c = document.createElement('canvas');
+    c.width = 640; c.height = 640;
+    var x = c.getContext('2d');
+    var g = x.createLinearGradient(0, 0, 640, 640);
+    g.addColorStop(0, '#0b0d13'); g.addColorStop(1, '#1d2440');
+    x.fillStyle = g; x.fillRect(0, 0, 640, 640);
+    x.fillStyle = 'rgb(255,70,85)'; x.fillRect(120, 90, 18, 300);
+    x.fillStyle = 'rgb(60,140,255)'; x.fillRect(504, 90, 18, 300);
+    if (S.peaks) {
+      x.fillStyle = 'rgba(255,255,255,0.22)';
+      for (var i = 0; i < 160; i++) {
+        var v = S.peaks[Math.floor(i / 160 * S.peaks.length)] || 0;
+        var h = Math.max(2, v * 200);
+        x.fillRect(160 + i * 2.1, 320 - h / 2, 1.4, h);
+      }
+    }
+    x.fillStyle = '#ffffff';
+    x.font = '600 44px "Chakra Petch", sans-serif';
+    x.fillText(String(title).slice(0, 28), 48, 560);
+    return new Promise(function (resolve) {
+      c.toBlob(function (blob) {
+        if (!blob) { resolve(null); return; }
+        blob.arrayBuffer().then(function (ab) { resolve(new Uint8Array(ab)); });
+      }, 'image/jpeg', 0.9);
+    });
+  }
+
+  function saveFile(filename, data) {
+    if (!DL) {
+      log('Saving is not available in this view. Open the page from claude.ai to download files.', 'warn');
+      return Promise.resolve();
+    }
+    return DL.save({ filename: filename, data: data }).then(function () {
+      log('Saved ' + filename + '.', 'ok');
+    }).catch(function (e) {
+      var code = e && e.code;
+      if (code === 'declined') log('Save cancelled.', 'warn');
+      else if (code === 'too_large') log('That file is too large to save here.', 'bad');
+      else log('Could not save ' + filename + (code ? ' (' + code + ')' : '') + '.', 'bad');
+    });
+  }
+
+  function exportMapZip() {
+    var picked = BSM.DIFFICULTIES.filter(function (d) { return S.maps[d]; });
+    if (!S.an || !picked.length) { log('Generate a difficulty first.', 'warn'); return; }
+    var title = $('title').value.trim() || S.songName || 'Generated map';
+    var maps = {};
+    picked.forEach(function (d) { maps[d] = S.maps[d].map; });
+    var fmt = $('format').value;
+    var info = BSM.makeInfo({
+      songName: title,
+      artist: $('artist').value.trim(),
+      mapper: $('mapper').value.trim() || 'BeatForge',
+      bpm: S.an.bpm,
+      songFile: 'song.ogg',
+      coverFile: 'cover.jpg',
+      difficulties: picked.map(function (d) { return { name: d }; })
+    });
+    setBusy(true, 'Packing ' + safeName(title) + '.zip ...');
+    return makeCover(title).then(function (cover) {
+      var audio = S.audioIsOgg ? S.audioBytes : null;
+      var zip = fmt === 'v4'
+        ? BSM.buildMapZip({
+            format: 'v4', maps: maps, audio: audio, cover: cover, songFile: 'song.ogg',
+            sampleCount: S.pcm ? S.pcm.samples.length : Math.round(S.an.duration * 44100),
+            frequency: S.pcm ? S.pcm.sr : 44100,
+            meta: { songName: title, artist: $('artist').value.trim(), mapper: $('mapper').value.trim() || 'BeatForge', bpm: S.an.bpm, duration: S.an.duration }
+          })
+        : BSM.buildMapZip({ info: info, maps: maps, audio: audio, cover: cover });
+      if (!audio) log('song.ogg is not in the zip (the upload was not OGG). Add it to the folder before loading the map in game.', 'warn');
+      return saveFile(safeName(title) + '.zip', zip);
+    }).then(function () { setBusy(false); });
+  }
+
+  function exportBrain() {
+    return saveFile('beatforge-brain.json', JSON.stringify(S.brain));
+  }
+
+  function importBrain(file) {
+    return file.text().then(function (txt) {
+      var obj = JSON.parse(txt);
+      if (!obj || obj.format !== 'bsm-brain') throw new Error('That file is not a BeatForge brain.');
+      S.brain = BSM.normalizeBrain(obj);
+      saveBrain();
+      updateBrainSummary();
+      log('Loaded brain file: ' + file.name + '.', 'ok');
+    }).catch(function (e) {
+      log('Could not load brain: ' + (e && e.message ? e.message : e), 'bad');
+    });
+  }
+
+  /* ---------- drawing: track ---------- */
+  function fit(c) {
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    var W = c.clientWidth, H = c.clientHeight;
+    var pw = Math.round(W * dpr), ph = Math.round(H * dpr);
+    if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
+    var ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx: ctx, W: W, H: H };
+  }
+
+  function lowerBound(arr, t) {
+    var lo = 0, hi = arr.length;
+    while (lo < hi) { var m = (lo + hi) >> 1; if (arr[m].time < t) lo = m + 1; else hi = m; }
+    return lo;
+  }
+
+  function lightAt(list, bsNow) {
+    var lo = 0, hi = list.length - 1, idx = -1;
+    while (lo <= hi) {
+      var m = (lo + hi) >> 1;
+      if (list[m].time <= bsNow) { idx = m; lo = m + 1; } else hi = m - 1;
+    }
+    if (idx < 0) return null;
+    var e = list[idx];
+    if (!e.value) return null;
+    var col = e.value <= 4 ? RGB.red : (e.value <= 8 ? RGB.blue : RGB.white);
+    var kind = (e.value - 1) % 4; // 0 on, 1 flash, 2 fade, 3 transition
+    var dt = bsNow - e.time, I;
+    if (kind === 1) I = 0.25 + 0.75 * Math.max(0, 1 - dt * 3.5);
+    else if (kind === 2) I = 0.2 + 0.8 * Math.max(0, 1 - dt * 1.2);
+    else I = kind === 3 ? 0.6 : 0.5;
+    return { c: col, I: I };
+  }
+
+  function drawLights(ctx, groups, bsNow, W, H, horizonY) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    var ring = lightAt(groups[1], bsNow);
+    if (ring) {
+      var rg = ctx.createRadialGradient(W / 2, horizonY, 0, W / 2, horizonY, W * 0.7);
+      rg.addColorStop(0, rgba(ring.c, 0.34 * ring.I));
+      rg.addColorStop(1, rgba(ring.c, 0));
+      ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+    }
+    var back = lightAt(groups[0], bsNow);
+    if (back) {
+      ctx.strokeStyle = rgba(back.c, 0.6 * back.I); ctx.lineWidth = 2;
+      for (var i = -3; i <= 3; i++) {
+        ctx.beginPath(); ctx.moveTo(W / 2, horizonY); ctx.lineTo(W / 2 + i * W * 0.2, H); ctx.stroke();
+      }
+    }
+    var left = lightAt(groups[2], bsNow);
+    if (left) {
+      ctx.strokeStyle = rgba(left.c, 0.7 * left.I); ctx.lineWidth = 2.5;
+      for (var j = 0; j < 3; j++) {
+        ctx.beginPath(); ctx.moveTo(0, H * (0.2 + j * 0.2)); ctx.lineTo(W / 2, horizonY); ctx.stroke();
+      }
+    }
+    var right = lightAt(groups[3], bsNow);
+    if (right) {
+      ctx.strokeStyle = rgba(right.c, 0.7 * right.I); ctx.lineWidth = 2.5;
+      for (var k = 0; k < 3; k++) {
+        ctx.beginPath(); ctx.moveTo(W, H * (0.2 + k * 0.2)); ctx.lineTo(W / 2, horizonY); ctx.stroke();
+      }
+    }
+    var center = lightAt(groups[4], bsNow);
+    if (center) {
+      var cg = ctx.createLinearGradient(0, H, 0, H * 0.45);
+      cg.addColorStop(0, rgba(center.c, 0.42 * center.I));
+      cg.addColorStop(1, rgba(center.c, 0));
+      ctx.fillStyle = cg; ctx.fillRect(0, H * 0.45, W, H * 0.55);
+    }
+    ctx.restore();
+  }
+
+  function drawArrow(ctx, cx, cy, dir, L) {
+    var v = VEC[dir];
+    var x1 = cx - v[0] * L, y1 = cy - v[1] * L, x2 = cx + v[0] * L, y2 = cy + v[1] * L;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    var ang = Math.atan2(v[1], v[0]), hl = L * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2); ctx.lineTo(x2 - hl * Math.cos(ang - 0.55), y2 - hl * Math.sin(ang - 0.55));
+    ctx.moveTo(x2, y2); ctx.lineTo(x2 - hl * Math.cos(ang + 0.55), y2 - hl * Math.sin(ang + 0.55));
+    ctx.stroke();
+  }
+
+  function drawTrack() {
+    var g = fit($('track'));
+    var ctx = g.ctx, W = g.W, H = g.H;
+    ctx.fillStyle = '#07090e';
+    ctx.fillRect(0, 0, W, H);
+    var an = S.an;
+    if (!an) {
+      ctx.fillStyle = '#7d8599'; ctx.font = '15px ' + 'system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('Drop a song to start', W / 2, H / 2);
+      return;
+    }
+    var entry = S.maps[S.preview];
+    var P = an.period;
+    var t = $('player').currentTime || 0;
+    var bsNow = t / P;
+    var hitY = H * 0.86, horizonY = H * 0.1;
+    var cell = Math.min(W / 5.4, 124);
+    var sc = function (D) { return 1 / (1 + Math.max(0, D) * DEPTH); };
+    var yb = function (s) { return horizonY + (hitY - horizonY) * s; };
+    var proj = function (lane, layer, D) {
+      var s = sc(D);
+      return { x: W / 2 + (lane - 1.5) * cell * s, y: yb(s) - (layer + 0.5) * cell * 0.92 * s, s: s };
+    };
+
+    if (entry) drawLights(ctx, entryPrep(entry).groups, bsNow, W, H, horizonY);
+
+    // perspective lane lines and the hit-plane grid
+    ctx.strokeStyle = 'rgba(160,172,200,0.16)'; ctx.lineWidth = 1;
+    var far = sc(LOOK);
+    for (var e = 0; e <= 4; e++) {
+      var xn = W / 2 + (e - 2) * cell;
+      ctx.beginPath(); ctx.moveTo(xn, hitY); ctx.lineTo(W / 2 + (e - 2) * cell * far, yb(far)); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(190,200,225,0.34)';
+    for (var l = 0; l <= 3; l++) {
+      var yl = hitY - l * cell * 0.92;
+      ctx.beginPath(); ctx.moveTo(W / 2 - 2 * cell, yl); ctx.lineTo(W / 2 + 2 * cell, yl); ctx.stroke();
+    }
+    for (var e2 = 0; e2 <= 4; e2++) {
+      var xe = W / 2 + (e2 - 2) * cell;
+      ctx.beginPath(); ctx.moveTo(xe, hitY); ctx.lineTo(xe, hitY - 3 * cell * 0.92); ctx.stroke();
+    }
+
+    if (!entry) {
+      ctx.fillStyle = '#7d8599'; ctx.font = '15px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('Generate a difficulty to see it here', W / 2, H * 0.42);
+      drawHud(ctx, W, H, an, bsNow, null);
+      return;
+    }
+
+    var m = entry.map;
+    // walls
+    for (var wi = 0; wi < m.walls.length; wi++) {
+      var w = m.walls[wi];
+      var D0 = w.time - bsNow, D1 = w.time + w.dur - bsNow;
+      if (D1 < -0.1 || D0 > LOOK) continue;
+      var f = sc(Math.max(0, D0)), b = sc(Math.min(LOOK, Math.max(0, D1)));
+      var x = function (edge, s) { return W / 2 + (edge - 2) * cell * s; };
+      var yTopF, yTopB, yBotF, yBotB, xl, xr;
+      if (w.type === 0) {
+        xl = [x(w.lane, f), x(w.lane, b)];
+        xr = [x(w.lane + w.width, f), x(w.lane + w.width, b)];
+        yBotF = yb(f); yBotB = yb(b);
+        yTopF = yBotF - 3 * cell * 0.92 * f; yTopB = yBotB - 3 * cell * 0.92 * b;
+      } else {
+        xl = [x(0, f), x(0, b)];
+        xr = [x(4, f), x(4, b)];
+        yBotF = yb(f) - 2 * cell * 0.92 * f; yBotB = yb(b) - 2 * cell * 0.92 * b;
+        yTopF = yb(f) - 3 * cell * 0.92 * f; yTopB = yb(b) - 3 * cell * 0.92 * b;
+      }
+      ctx.fillStyle = rgba(RGB.wall, 0.42);
+      ctx.beginPath();
+      ctx.moveTo(xl[0], yTopF); ctx.lineTo(xr[0], yTopF); ctx.lineTo(xr[1], yTopB); ctx.lineTo(xl[1], yTopB);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = rgba(RGB.wall, 0.22);
+      ctx.beginPath();
+      ctx.moveTo(xl[0], yTopF); ctx.lineTo(xr[0], yTopF); ctx.lineTo(xr[0], yBotF); ctx.lineTo(xl[0], yBotF);
+      ctx.closePath(); ctx.fill();
+    }
+
+    // notes, far first so near ones sit on top
+    var i0 = lowerBound(m.notes, bsNow - 0.2);
+    var i1 = lowerBound(m.notes, bsNow + LOOK + 0.001);
+    for (var ni = i1 - 1; ni >= i0; ni--) {
+      var n = m.notes[ni];
+      var D = n.time - bsNow;
+      if (D < -0.2) continue;
+      var p = proj(n.lane, n.layer, D);
+      var size = cell * 0.8 * p.s;
+      var c = n.color === 0 ? RGB.red : RGB.blue;
+      ctx.globalAlpha = D < 0 ? Math.max(0, 1 + D / 0.2) : 1;
+      if (Math.abs(D) < 0.05) { ctx.shadowColor = rgba(c, 0.9); ctx.shadowBlur = 22; }
+      ctx.fillStyle = rgba(c, 0.92);
+      ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = Math.max(1, size * 0.04);
+      ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+      ctx.fillStyle = 'rgba(12,12,18,0.9)'; ctx.strokeStyle = 'rgba(12,12,18,0.9)';
+      if (n.dir === 8) {
+        ctx.beginPath(); ctx.arc(p.x, p.y, size * 0.2, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.lineWidth = Math.max(1.5, size * 0.09);
+        drawArrow(ctx, p.x, p.y, n.dir, size * 0.3);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // bombs
+    for (var bi = 0; bi < m.bombs.length; bi++) {
+      var bo = m.bombs[bi];
+      var Db = bo.time - bsNow;
+      if (Db < -0.2 || Db > LOOK) continue;
+      var pb = proj(bo.lane, bo.layer, Db);
+      var rb = cell * 0.3 * pb.s;
+      ctx.globalAlpha = Db < 0 ? Math.max(0, 1 + Db / 0.2) : 1;
+      ctx.fillStyle = '#0d0e13';
+      ctx.beginPath(); ctx.arc(pb.x, pb.y, rb, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = Math.max(1, rb * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(pb.x - rb * 0.55, pb.y - rb * 0.55); ctx.lineTo(pb.x + rb * 0.55, pb.y + rb * 0.55);
+      ctx.moveTo(pb.x + rb * 0.55, pb.y - rb * 0.55); ctx.lineTo(pb.x - rb * 0.55, pb.y + rb * 0.55);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    drawHud(ctx, W, H, an, bsNow, entry);
+  }
+
+  function entryPrep(entry) {
+    if (entry._prep) return entry._prep;
+    var groups = [[], [], [], [], []];
+    entry.map.events.forEach(function (e) { if (e.type >= 0 && e.type <= 4) groups[e.type].push(e); });
+    entry._prep = { groups: groups };
+    return entry._prep;
+  }
+
+  function sectionAt(an, t) {
+    var k = Math.floor((t - an.phase) / an.period);
+    for (var i = 0; i < an.sections.length; i++) {
+      var s = an.sections[i];
+      if (k >= s.start && k < s.end) return s;
+    }
+    return null;
+  }
+
+  function drawHud(ctx, W, H, an, bsNow, entry) {
+    var t = bsNow * an.period;
+    var sec = sectionAt(an, t);
+    var bar = Math.floor(bsNow / 4) + 1;
+    var nps = 0;
+    if (entry) {
+      var a = lowerBound(entry.map.notes, bsNow - 4), b = lowerBound(entry.map.notes, bsNow);
+      nps = (b - a) / (4 * an.period);
+    }
+    ctx.textAlign = 'left';
+    ctx.font = '500 12px ui-monospace, Menlo, Consolas, monospace';
+    ctx.fillStyle = 'rgba(214,220,236,0.92)';
+    ctx.fillText('beat ' + bsNow.toFixed(1) + '   bar ' + bar + '   ' + (sec ? sec.level + (sec.drop ? ' drop' : '') : ''), 12, 20);
+    if (entry) {
+      ctx.textAlign = 'right';
+      ctx.fillText(LABEL[entry.meta.difficulty] + '   ' + nps.toFixed(1) + ' notes/s', W - 12, 20);
+    }
+  }
+
+  /* ---------- drawing: timeline ---------- */
+  function drawTimeline() {
+    var g = fit($('timeline'));
+    var ctx = g.ctx, W = g.W, H = g.H;
+    ctx.fillStyle = '#07090e';
+    ctx.fillRect(0, 0, W, H);
+    var an = S.an;
+    if (!an) return;
+    var dur = an.duration;
+    var x = function (sec) { return sec / dur * W; };
+    an.sections.forEach(function (s, i) {
+      var t0 = an.phase + s.start * an.period, t1 = an.phase + s.end * an.period;
+      if (i % 2) { ctx.fillStyle = 'rgba(255,255,255,0.035)'; ctx.fillRect(x(t0), 0, x(t1) - x(t0), H); }
+      ctx.fillStyle = LEVEL_COL[s.level] || '#555';
+      ctx.fillRect(x(t0), H - 5, Math.max(1, x(t1) - x(t0) - 1), 5);
+    });
+    if (S.peaks) {
+      ctx.fillStyle = 'rgba(150,162,190,0.38)';
+      var mid = H * 0.5, pk = S.peaks, n = pk.length;
+      for (var i = 0; i < W; i++) {
+        var v = pk[Math.min(n - 1, Math.floor(i / W * n))];
+        var h = Math.max(1, v * H * 0.4);
+        ctx.fillRect(i, mid - h, 1, h * 2);
+      }
+    }
+    var entry = S.maps[S.preview];
+    if (entry) {
+      var m = entry.map, P = an.period;
+      m.walls.forEach(function (w) {
+        var xs = x(w.time * P), xw = Math.max(2, x((w.time + w.dur) * P) - xs);
+        ctx.fillStyle = rgba(RGB.wall, 0.9);
+        ctx.fillRect(xs, 5, xw, 6);
+      });
+      m.notes.forEach(function (nt) {
+        ctx.fillStyle = nt.color === 0 ? 'rgb(255,70,85)' : 'rgb(60,140,255)';
+        ctx.fillRect(x(nt.time * P), H - 22, 1.6, 12);
+      });
+      m.bombs.forEach(function (bo) {
+        ctx.fillStyle = 'rgba(214,220,236,0.85)';
+        ctx.fillRect(x(bo.time * P), H - 30, 2, 5);
+      });
+    }
+    var t = $('player').currentTime || 0;
+    ctx.fillStyle = '#e0a017';
+    ctx.fillRect(x(t) - 1, 0, 2, H);
+  }
+
+  /* ---------- panels ---------- */
+  function renderChips() {
+    var box = $('chips');
+    box.innerHTML = '';
+    BSM.DIFFICULTIES.forEach(function (d) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip';
+      b.textContent = LABEL[d];
+      b.setAttribute('aria-pressed', S.picked[d] ? 'true' : 'false');
+      b.addEventListener('click', function () {
+        S.picked[d] = !S.picked[d];
+        b.setAttribute('aria-pressed', S.picked[d] ? 'true' : 'false');
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function renderStats() {
+    var box = $('stats');
+    var entry = S.maps[S.preview];
+    if (!entry) {
+      box.innerHTML = '<p class="muted">' + (S.an ? 'Generate a difficulty to see its stats here.' : 'Drop a song, then generate a difficulty to see its stats here.') + '</p>';
+      return;
+    }
+    var st = entry.meta.stats, v = entry.meta.validation;
+    var ok = v.errors.length === 0 && v.reachViolations === 0;
+    var cards = [
+      ['Notes', st.notes, st.redNotes + ' red / ' + st.blueNotes + ' blue'],
+      ['Notes per second', st.nps.toFixed(2), 'peak ' + st.peakNps.toFixed(1)],
+      ['Double beats', st.chordBeats, 'both sabers on one beat'],
+      ['Dots', st.dots, 'hit from any direction'],
+      ['Bombs', st.bombs, 'free cells, away from swings'],
+      ['Walls', st.walls, st.fullWalls + ' full / ' + st.crouchWalls + ' crouch'],
+      ['Light events', st.events, 'lightshow v2'],
+      ['Playability', ok ? 'Pass' : 'Review', v.reachViolations + ' fast moves, ' + v.errors.length + ' errors']
+    ];
+    box.innerHTML = cards.map(function (c) {
+      return '<div class="stat"><span class="k">' + c[0] + '</span><span class="v">' + c[1] + '</span><span class="s">' + c[2] + '</span></div>';
+    }).join('');
+  }
+
+  function renderTable() {
+    var t = $('diffTable');
+    var rows = BSM.DIFFICULTIES.filter(function (d) { return S.maps[d]; });
+    if (!rows.length) { t.innerHTML = ''; return; }
+    var html = '<thead><tr><th>Difficulty</th><th>Notes</th><th>Per second</th><th>Bombs</th><th>Walls</th><th>Check</th><th></th></tr></thead><tbody>';
+    rows.forEach(function (d) {
+      var e = S.maps[d], st = e.meta.stats, v = e.meta.validation;
+      var ok = v.errors.length === 0 && v.reachViolations === 0;
+      html += '<tr class="' + (d === S.preview ? 'current' : '') + '">' +
+        '<td>' + LABEL[d] + '</td><td>' + st.notes + '</td><td>' + st.nps.toFixed(2) + '</td><td>' + st.bombs + '</td><td>' + st.walls + '</td>' +
+        '<td><span class="pill ' + (ok ? 'ok' : 'warn') + '">' + (ok ? 'pass' : 'review') + '</span></td>' +
+        '<td><button type="button" data-diff="' + d + '">' + (d === S.preview ? 'Previewing' : 'Preview') + '</button></td></tr>';
+    });
+    t.innerHTML = html + '</tbody>';
+  }
+
+  function renderSongButtons() {
+    var has = !!S.an, any = Object.keys(S.maps).length > 0;
+    $('btnGenerate').disabled = !has;
+    $('btnReroll').disabled = !has;
+    $('btnExport').disabled = !any;
+  }
+
+  function renderAll() {
+    renderStats();
+    renderTable();
+    renderSongButtons();
+  }
+
+  /* ---------- wiring ---------- */
+  function wireDrop(zone, input, handler) {
+    zone.addEventListener('click', function () { input.click(); });
+    zone.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
+    zone.setAttribute('role', 'button');
+    zone.setAttribute('tabindex', '0');
+    input.addEventListener('change', function () { if (input.files && input.files.length) handler(input.files); input.value = ''; });
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('over'); });
+    });
+    zone.addEventListener('drop', function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) handler(e.dataTransfer.files);
+    });
+  }
+
+  function bindControls() {
+    [['density', 'oDensity', function (v) { return v + '%'; }],
+     ['chaos', 'oChaos', function (v) { return v + '%'; }],
+     ['walls', 'oWalls', function (v) { return v + '%'; }],
+     ['bombs', 'oBombs', function (v) { return v + '%'; }],
+     ['art', 'oArt', function (v) { return v + '%'; }],
+     ['streams', 'oStreams', function (v) { return v + '%'; }]].forEach(function (c) {
+      var inp = $(c[0]);
+      var show = function () { $(c[1]).textContent = c[2](inp.value); };
+      inp.addEventListener('input', show);
+      show();
+    });
+
+    $('tempo').addEventListener('change', function () {
+      if (!S.pcm) return;
+      setBusy(true, 'Re-reading the tempo ...');
+      tick().then(function () {
+        S.an = BSM.analyzeAudio(S.pcm.samples, S.pcm.sr, { tempoScale: parseFloat($('tempo').value) || 1 });
+        S.maps = {}; S.preview = '';
+        renderSongInfo(); renderAll();
+        log('Tempo now ' + S.an.bpm.toFixed(2) + ' BPM. Generate again to use it.', 'ok');
+      }).then(function () { setBusy(false); });
+    });
+    wireDrop($('dropSong'), $('fileSong'), function (files) { loadSong(files[0]); });
+    wireDrop($('dropLearn'), $('fileLearn'), function (files) { learnFiles(files); });
+    $('fileBrain').addEventListener('change', function () {
+      if (this.files && this.files[0]) importBrain(this.files[0]);
+      this.value = '';
+    });
+    $('btnBrainExport').addEventListener('click', function () { exportBrain(); });
+    $('btnBrainReset').addEventListener('click', function () {
+      var btn = $('btnBrainReset');
+      if (!resetArmed) {
+        resetArmed = true;
+        btn.textContent = 'Tap again to reset';
+        setTimeout(function () { resetArmed = false; btn.textContent = 'Reset brain'; }, 4000);
+        return;
+      }
+      resetArmed = false;
+      btn.textContent = 'Reset brain';
+      S.brain = cloneDefault();
+      saveBrain();
+      updateBrainSummary();
+      log('Brain reset to the built-in reference knowledge.', 'ok');
+    });
+    $('btnGenerate').addEventListener('click', function () { generate(false); });
+    $('btnReroll').addEventListener('click', function () { generate(true); });
+    $('btnExport').addEventListener('click', function () { exportMapZip(); });
+    $('diffTable').addEventListener('click', function (e) {
+      var b = e.target.closest ? e.target.closest('button[data-diff]') : null;
+      if (!b) return;
+      S.preview = b.getAttribute('data-diff');
+      renderAll();
+    });
+    $('timeline').addEventListener('click', function (e) {
+      if (!S.an) return;
+      var r = e.currentTarget.getBoundingClientRect();
+      var frac = (e.clientX - r.left) / r.width;
+      $('player').currentTime = Math.max(0, Math.min(1, frac)) * S.an.duration;
+    });
+  }
+
+  function initCapabilities() {
+    var ready = function (ok) {
+      $('btnBrainExport').hidden = !ok;
+      $('btnExport').hidden = !ok;
+      $('saveNote').textContent = ok
+        ? 'Exports download as a zip you can drop into the Beat Saber custom songs folder.'
+        : 'Saving files is off in this view. Open the page from claude.ai to download the zip and brain file.';
+    };
+    var p = null;
+    try {
+      if (window.claude && typeof window.claude.use === 'function') p = window.claude.use('downloads');
+    } catch (e) { p = null; }
+    if (!p) { ready(false); return; }
+    Promise.resolve(p).then(function (cap) {
+      DL = cap || null;
+      ready(!!DL);
+    }).catch(function () { DL = null; ready(false); });
+  }
+
+  function init() {
+    S.brain = loadBrain();
+    updateBrainSummary();
+    renderChips();
+    bindControls();
+    renderAll();
+    initCapabilities();
+    (function loop() {
+      drawTrack();
+      drawTimeline();
+      window.requestAnimationFrame(loop);
+    })();
+    log('Ready. Drop a song, then generate.', '');
+  }
+
+  init();
+})();
+</script>
