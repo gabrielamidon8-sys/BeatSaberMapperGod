@@ -283,6 +283,10 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
           <input type="range" id="repeat" min="0" max="150" value="100" step="5">
         </label>
         <label>
+          <span class="lbl">Hit following <output id="oFollow"></output></span>
+          <input type="range" id="follow" min="0" max="150" value="100" step="5">
+        </label>
+        <label>
           <span class="lbl">Tech level <output id="oTech"></output></span>
           <input type="range" id="tech" min="0" max="200" value="100" step="5">
         </label>
@@ -509,7 +513,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
             renderAll();
             $('btnGenerate').disabled = false;
             $('btnReroll').disabled = false;
-            log('Loaded ' + S.songName + ': ' + an.bpm.toFixed(2) + ' BPM, ' + an.sections.length + ' sections, ' + fmtTime(an.duration) + '.', 'ok');
+            log('Loaded ' + S.songName + ': ' + an.bpm.toFixed(3) + ' BPM, ' + an.sections.length + ' sections, ' + fmtTime(an.duration) + '.', 'ok');
+            if (an.drift && an.drift.chunks >= 5 && an.drift.beforeMs > 45) log('This song\'s beat wanders by about ' + Math.round(an.drift.beforeMs) + ' ms (live drummer or tempo changes), so a few sections may sit slightly off the grid.', 'warn');
             if (!S.audioIsOgg) log('Beat Saber plays Ogg Vorbis, so the song is converted to song.ogg when you export.', 'ok');
           });
         });
@@ -531,7 +536,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     if (!an) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     box.innerHTML =
-      '<div><dt>Tempo</dt><dd>' + an.bpm.toFixed(2) + ' BPM</dd></div>' +
+      '<div><dt>Tempo</dt><dd>' + an.bpm.toFixed(3) + ' BPM</dd></div>' +
       '<div><dt>Length</dt><dd>' + fmtTime(an.duration) + '</dd></div>' +
       '<div><dt>Beat lock</dt><dd>' + Math.round(an.tempoConfidence * 100) + '%</dd></div>' +
       '<div><dt>Sections</dt><dd>' + an.sections.length + '</dd></div>' +
@@ -602,6 +607,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       tech: num('tech') / 100,
       combos: num('combos') / 100,
       streams: num('streams') / 100,
+      follow: num('follow') / 100,
       lights: $('lights').checked,
       candidates: parseInt($('candidates').value, 10)
     };
@@ -1403,6 +1409,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
      ['lightAmount', 'oLightAmt', function (v) { return v + '%'; }],
      ['lightMood', 'oLightMood', function (v) { return v + '%'; }],
      ['instruments', 'oInst', function (v) { return v + '%'; }],
+     ['follow', 'oFollow', function (v) { return v + '%'; }],
      ['tech', 'oTech', function (v) { return v + '%'; }],
      ['combos', 'oCombos', function (v) { return v + '%'; }],
      ['repeat', 'oRepeat', function (v) { return v + '%'; }],

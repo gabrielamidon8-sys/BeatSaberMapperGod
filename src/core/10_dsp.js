@@ -70,24 +70,33 @@
     return s / n;
   }
 
-  // Tempo from the autocorrelation of the onset envelope (60-200 BPM, mild prior around 120).
+  // Tempo from the autocorrelation of the onset envelope (60-200 BPM, mild prior around 120). A candidate must also
+  // repeat at 2, 3 and 4 beats and have a half-beat texture: that rejects 3:2 mistakes (172.8 read as 115.2).
   function estimateTempo(env, fps) {
-    const minLag = Math.max(1, Math.floor(fps * 60 / 200) - 1);
-    const maxLag = Math.ceil(fps * 60 / 60) + 2;
+    const minLag = 1;
+    const maxBeatLag = Math.ceil(fps * 60 / 60) + 2;
+    const maxLag = maxBeatLag * 4 + 3;
     const ac = new Float64Array(maxLag + 2);
     for (let L = minLag; L <= maxLag + 1; L++) ac[L] = autocorrAt(env, L);
+    const zero = autocorrAt(env, 0) || 1;
     const at = function (lag) {
+      if (lag < 1) return 0;
       const L = Math.floor(lag), f = lag - L;
+      if (L + 1 >= ac.length) return 0;
       return ac[L] * (1 - f) + ac[L + 1] * f;
+    };
+    const rawOf = function (bpm) {
+      const L = fps * 60 / bpm;
+      return at(L) + 0.75 * at(2 * L) + 0.5 * at(3 * L) + 0.5 * at(4 * L) + 0.45 * at(L / 2);
     };
     const scoreOf = function (bpm) {
       const w = Math.exp(-0.5 * Math.pow((Math.log2(bpm) - Math.log2(120)) / 1.2, 2));
-      return at(fps * 60 / bpm) * (0.8 + 0.2 * w);
+      return rawOf(bpm) * (0.8 + 0.2 * w);
     };
     let bestBpm = 120, bestScore = -Infinity;
-    for (let bpm = 60; bpm <= 200; bpm += 0.25) {
-      const s = scoreOf(bpm);
-      if (s > bestScore) { bestScore = s; bestBpm = bpm; }
+    for (let bpm = 60; bpm <= 200; bpm += 0.1) {
+      const sc = scoreOf(bpm);
+      if (sc > bestScore) { bestScore = sc; bestBpm = bpm; }
     }
     // Resolve octave ambiguity: prefer the candidate closest to 120 BPM when it is nearly as strong.
     const cands = [bestBpm];
@@ -95,11 +104,123 @@
     if (bestBpm / 2 >= 60) cands.push(bestBpm / 2);
     let pick = bestBpm, pickScore = -Infinity;
     for (const c of cands) {
-      const s = scoreOf(c) * (1 + 0.06 * Math.exp(-Math.abs(Math.log2(c / 120))));
-      if (s > pickScore) { pickScore = s; pick = c; }
+      const sc = scoreOf(c) * (1 + 0.06 * Math.exp(-Math.abs(Math.log2(c / 120))));
+      if (sc > pickScore) { pickScore = sc; pick = c; }
     }
-    const zero = autocorrAt(env, 0) || 1;
-    return { bpm: pick, confidence: Math.min(1, Math.max(0, bestScore / zero)) };
+    return { bpm: pick, confidence: Math.min(1, Math.max(0, at(fps * 60 / pick) / zero)) };
+  }
+
+  /* Exact tempo and beat phase. Fold the onset envelope on a trial period: when the period is exactly right every
+   * beat lands on the same phase and the folded profile becomes a sharp spike, so the score (sum of squares) peaks.
+   * Coarse-to-fine over a growing part of the song gives a period accurate to a few parts per million; a regression
+   * of the local phase over the song then removes whatever drift is left. */
+  function foldProfile(env, fps, P, B, n, prof, from) {
+    prof.fill(0);
+    const Pf = P * fps, m = Math.min((from || 0) + n, env.length);
+    for (let f = from || 0; f < m; f++) {
+      const v = env[f];
+      if (v < 0.03) continue;
+      const x = ((f / Pf) % 1) * B, b0 = Math.floor(x), fr = x - b0;
+      prof[b0 % B] += v * (1 - fr);
+      prof[(b0 + 1) % B] += v * fr;
+    }
+  }
+  function foldScore(env, fps, P, B, n, prof, from) {
+    foldProfile(env, fps, P, B, n, prof, from);
+    let sc = 0;
+    for (let b = 0; b < B; b++) sc += prof[b] * prof[b];
+    return sc;
+  }
+  // Concentration of the onsets on a trial period: length of the resultant vector of the onset phases at harmonics
+  // 1, 2 and 4 of the beat (not 3, so a 3:2 mistake cannot score well). Smooth in P, no binning artefacts.
+  function periodScore(T, W, P, i0, i1) {
+    let r1 = 0, q1 = 0, r2 = 0, q2 = 0, r4 = 0, q4 = 0, sw = 0;
+    const TP = 2 * Math.PI / P;
+    for (let i = i0; i < i1; i++) {
+      const th = T[i] * TP, c = Math.cos(th), sn = Math.sin(th), w = W[i];
+      const c2 = c * c - sn * sn, s2 = 2 * c * sn, c4 = c2 * c2 - s2 * s2, s4 = 2 * c2 * s2;
+      r1 += w * c; q1 += w * sn; r2 += w * c2; q2 += w * s2; r4 += w * c4; q4 += w * s4; sw += w;
+    }
+    if (sw <= 0) return 0;
+    return ((r1 * r1 + q1 * q1) + 0.6 * (r2 * r2 + q2 * q2) + 0.4 * (r4 * r4 + q4 * q4)) / (sw * sw);
+  }
+  function lowerIdx(T, t) { let lo = 0, hi = T.length; while (lo < hi) { const m = (lo + hi) >> 1; if (T[m] < t) lo = m + 1; else hi = m; } return lo; }
+  // Beam search over the period: each stage keeps the best few local maxima, so a false alias from an early
+  // (short) stage cannot lock the answer in. Returns { P, score } at full song length.
+  function refineTempo(T, W, duration, bpm0, span) {
+    if (T.length < 16) return { P: 60 / bpm0, score: 0 };
+    // the busiest stretch of the song is the best place to start (intros are often beatless)
+    const win = Math.min(duration, 24);
+    let w0 = 0, bestN = -1;
+    for (let t0 = 0; t0 + win <= duration + 1e-9; t0 += 2) {
+      const n = lowerIdx(T, t0 + win) - lowerIdx(T, t0);
+      if (n > bestN) { bestN = n; w0 = t0; }
+    }
+    const a2 = Math.max(0, Math.min(w0 - 23, duration - 70));
+    const stages = [
+      [span || 0.02, 5e-5, lowerIdx(T, w0), lowerIdx(T, w0 + win)],
+      [4e-4, 1e-5, lowerIdx(T, a2), lowerIdx(T, a2 + 70)],
+      [8e-5, 2e-6, 0, T.length],
+      [1.2e-5, 4e-7, 0, T.length]
+    ];
+    let centers = [60 / bpm0];
+    for (let si = 0; si < stages.length; si++) {
+      const st = stages[si], found = [];
+      for (const c of centers) {
+        const steps = Math.round(st[0] / st[1]);
+        const sc = new Float64Array(2 * steps + 1);
+        for (let k = -steps; k <= steps; k++) sc[k + steps] = periodScore(T, W, c * (1 + k * st[1]), st[2], st[3]);
+        for (let k = 0; k < sc.length; k++) {
+          if ((k === 0 || sc[k] >= sc[k - 1]) && (k === sc.length - 1 || sc[k] > sc[k + 1])) found.push({ P: c * (1 + (k - steps) * st[1]), s: sc[k] });
+        }
+      }
+      found.sort(function (a, b) { return b.s - a.s; });
+      const keep = [];
+      for (const f of found) {
+        if (keep.every(function (q) { return Math.abs(q.P / f.P - 1) > st[1] * 3; })) keep.push(f);
+        if (keep.length >= 8) break;
+      }
+      centers = keep.map(function (q) { return q.P; });
+      if (si === stages.length - 1) return { P: keep[0].P, score: keep[0].s };
+    }
+  }
+  // Move the phase onto the weighted centre of the onsets that sit near the beat (sub-frame accurate).
+  function centreGrid(T, W, P, A) {
+    for (let it = 0; it < 3; it++) {
+      let sx = 0, sw = 0;
+      const tol = Math.min(0.03, 0.12 * P);
+      for (let k = Math.ceil((T[0] - A) / P); ; k++) {
+        const g = A + k * P;
+        if (g > T[T.length - 1] + P) break;
+        const j = lowerIdx(T, g - tol);
+        for (let q = j; q < T.length && T[q] <= g + tol; q++) { sx += W[q] * (T[q] - g); sw += W[q]; }
+      }
+      if (sw > 0) A += sx / sw;
+    }
+    return ((A % P) + P) % P;
+  }
+
+  // Phase of the beat grid: peak of the folded profile of the phase envelope (kick-weighted), sub-bin by parabola.
+  function foldPhase(phaseEnv, fps, P, from, to) {
+    const B = 192, prof = new Float64Array(B);
+    prof.fill(0);
+    const Pf = P * fps;
+    for (let f = from; f < Math.min(to, phaseEnv.length); f++) {
+      const v = phaseEnv[f];
+      if (v < 0.03) continue;
+      const x = ((f / Pf) % 1) * B, b0 = Math.floor(x), fr = x - b0;
+      prof[b0 % B] += v * (1 - fr);
+      prof[(b0 + 1) % B] += v * fr;
+    }
+    const sm = new Float64Array(B);
+    for (let b = 0; b < B; b++) sm[b] = 0.25 * prof[(b + B - 1) % B] + 0.5 * prof[b] + 0.25 * prof[(b + 1) % B];
+    let bi = 0;
+    for (let b = 1; b < B; b++) if (sm[b] > sm[bi]) bi = b;
+    const y0 = sm[(bi + B - 1) % B], y1 = sm[bi], y2 = sm[(bi + 1) % B];
+    const den = y0 - 2 * y1 + y2;
+    const d = den < 0 ? 0.5 * (y0 - y2) / den : 0;
+    let w = 0; for (let b = 0; b < B; b++) w += prof[b];
+    return { phase: (((bi + d) / B) % 1 + 1) % 1 * P, weight: w, peak: y1 };
   }
 
   // Dynamic-programming beat tracker (Ellis 2007) with a fixed period.
@@ -141,16 +262,45 @@
     return { P: P, a: a };
   }
 
-  // Local maxima of the (0..1 normalised) onset envelope: the song's note-worthy events.
-  function onsetPeaks(env, fps) {
-    const minSep = Math.max(1, Math.round(0.045 * fps));
-    const out = [];
-    let last = -1e9;
-    for (let i = 1; i < env.length - 1; i++) {
-      if (env[i] > 0.22 && env[i] >= env[i - 1] && env[i] > env[i + 1] && i - last >= minSep) { out.push(i / fps); last = i; }
+  // Beat tracker + robust regression: precise on real songs once the period is already close (it follows
+  // the actual beats instead of a statistic). Returns null when the track is unusable.
+  const DRIFT_FIX = false;   // the comb-phase line is only reported: on real songs the beat tracker is the better period
+  function dpRefine(onset, fps, P0) {
+    const path = trackBeats(onset, fps, 60 / P0);
+    const times = path.map(function (f) { return f / fps; });
+    if (times.length < 8) return null;
+    let fit = fitGrid(times);
+    for (let pass = 0; pass < 2; pass++) {
+      let sx = 0, sy = 0, sxx = 0, sxy = 0, m = 0;
+      for (let i = 0; i < times.length; i++) {
+        if (Math.abs(times[i] - (fit.a + i * fit.P)) >= 0.1 * fit.P) continue;
+        sx += i; sy += times[i]; sxx += i * i; sxy += i * times[i]; m++;
+      }
+      const den = m * sxx - sx * sx;
+      if (m < 8 || !den) return null;
+      const Pn = (m * sxy - sx * sy) / den;
+      fit = { P: Pn, a: (sy - Pn * sx) / m };
     }
-    return out;
+    return fit;
   }
+
+  // Local maxima of the (0..1 normalised) onset envelope: the song's note-worthy events. Times are interpolated
+  // between frames (parabola through the peak) so they are good to about a millisecond.
+  function onsetPeaksW(env, fps, thr, sepSec) {
+    const minSep = Math.max(1, Math.round((sepSec || 0.045) * fps));
+    const t = [], w = [];
+    let last = -1e9;
+    const th = thr === undefined ? 0.22 : thr;
+    for (let i = 1; i < env.length - 1; i++) {
+      if (env[i] > th && env[i] >= env[i - 1] && env[i] > env[i + 1] && i - last >= minSep) {
+        const y0 = env[i - 1], y1 = env[i], y2 = env[i + 1], den = y0 - 2 * y1 + y2;
+        const d = den < 0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (y0 - y2) / den)) : 0;
+        t.push((i + d) / fps); w.push(y1); last = i;
+      }
+    }
+    return { t: t, w: w };
+  }
+  function onsetPeaks(env, fps) { return onsetPeaksW(env, fps).t; }
 
   // Pick the metrical octave. Autocorrelation often finds half time (92.5 for a 185 BPM song). If onsets arrive
   // much faster than the pulse, the real beat is the faster octave. opts.bpmHint (a map's own BPM) wins when the
@@ -212,7 +362,8 @@
       const off = f * hop;
       let e = 0;
       for (let i = 0; i < N; i++) {
-        const idx = off + i;
+        const idx = off + i - (N >> 1);   // frame f is centred on f*hop, so f/fps is the true time
+        if (idx < 0) { re[i] = 0; im[i] = 0; continue; }
         const s = idx < n ? samples[idx] : 0;
         re[i] = s * win[i]; im[i] = 0; e += s * s;
       }
@@ -271,36 +422,90 @@
     const onsetRate = peaks.length / Math.max(1, duration);
     const detectedBpm = tempo.bpm;
     tempo.bpm = chooseOctave(tempo.bpm, onsetRate, opts);
-    let beatFrames = trackBeats(onset, fps, tempo.bpm);
-    let beatTimes = beatFrames.map(function (f) { return (f * hop + N / 2) / sr; });
-    let P = 60 / tempo.bpm, A = 0;
-    if (beatTimes.length >= 4) {
-      let fit = fitGrid(beatTimes);
-      P = fit.P;
-      const keep = [];
-      for (let i = 0; i < beatTimes.length; i++) {
-        const r = Math.abs(beatTimes[i] - (fit.a + i * fit.P));
-        if (r < 0.1 * fit.P) keep.push(beatTimes[i]);
+    // exact period and phase from folding (see refineTempo); the old beat tracker is not needed any more
+    const phaseEnv = new Float32Array(frames);
+    for (let f = 0; f < frames; f++) phaseEnv[f] = Math.min(1, onset2[f] + 0.7 * inst.env.kick[f] + 0.4 * bassEnv[f]);
+    const pk = onsetPeaksW(onset2, fps, 0.18, 0.04);
+    let best = null;
+    {
+      const base = tempo.bpm;
+      const ratios = (opts && opts.tempoScale) ? [1] : [1, 1.5, 2 / 3, 4 / 3, 0.75];
+      const cand = [];
+      for (const r of ratios) {
+        const b = base * r;
+        if (b < 62 || b > 215) continue;
+        const rf = refineTempo(pk.t, pk.w, duration, b, r === 1 ? 0.02 : 0.012);
+        cand.push({ r: r, P: rf.P, score: rf.score });
       }
-      if (keep.length >= 4) {
-        // refit using only the kept beats (index is preserved by re-indexing against the fitted grid)
-        const idx = [];
-        for (let i = 0; i < beatTimes.length; i++) {
-          if (Math.abs(beatTimes[i] - (fit.a + i * fit.P)) < 0.1 * fit.P) idx.push(i);
-        }
-        let sx = 0, sy = 0, sxx = 0, sxy = 0;
-        for (const i of idx) { const t = beatTimes[i]; sx += i; sy += t; sxx += i * i; sxy += i * t; }
-        const m = idx.length, den = m * sxx - sx * sx;
-        if (den) { P = (m * sxy - sx * sy) / den; A = (sy - P * sx) / m; }
-        else { A = fit.a; }
-      } else {
-        A = fit.a;
+      best = cand[0];
+      // a different ratio only wins when its onsets are clearly more concentrated than the first guess
+      for (const c of cand) if (c.r !== 1 && c.score > cand[0].score * 1.3 && c.score > best.score) best = c;
+      tempo.ratioFix = best.r;
+      if (opts && opts.bpmHint) {   // a map's own BPM settles any 3:2 ambiguity
+        for (const c of cand) if (Math.abs(Math.log((60 / c.P) / opts.bpmHint)) < 0.02) { best = c; break; }
       }
-    } else {
-      A = 0;
     }
+    let P = best.P;
     if (!(P > 0.2 && P < 1.5)) P = 60 / tempo.bpm;
-    A = ((A % P) + P) % P; // phase in [0, P)
+    let A = foldPhase(phaseEnv, fps, P, 0, frames).phase;
+    {
+      const dp = dpRefine(onset, fps, P);
+      if (dp && Math.abs(dp.P / P - 1) < 8e-4) { P = dp.P; A = ((dp.a % P) + P) % P; }
+    }
+    // the phase envelope is kick-weighted; re-centre on the actual onsets near each beat
+    {
+      const kt = [], kw = [];
+      for (let q = 0; q < pk.t.length; q++) { kt.push(pk.t[q]); const f = Math.min(frames - 1, Math.round(pk.t[q] * fps)); kw.push(pk.w[q] * (0.5 + inst.env.kick[f] + 0.3 * bassEnv[f])); }
+      A = centreGrid(kt, kw, P, A);
+    }
+    // residual drift: the local phase of the onset comb (circular mean at the half beat, no window, so a drift of any
+    // size is visible) in every ~12 s chunk, then a line through those phases corrects the period. Iterated.
+    const drift = { beforeMs: 0, afterMs: 0, slopePpm: 0, chunks: 0 };
+    const kt2 = [], kw2 = [];
+    for (let q = 0; q < pk.t.length; q++) { kt2.push(pk.t[q]); const f = Math.min(frames - 1, Math.round(pk.t[q] * fps)); kw2.push(pk.w[q] * (0.5 + inst.env.kick[f] + 0.3 * bassEnv[f])); }
+    const localPhases = function (Pg, Ag) {
+      const pts = [], CH = 12, half = Pg / 2, TPI = 4 * Math.PI / Pg;
+      for (let c0 = 0; c0 + CH * 0.6 <= duration; c0 += CH) {
+        const i0 = lowerIdx(pk.t, c0), i1 = lowerIdx(pk.t, c0 + CH);
+        let r = 0, q = 0, sw = 0;
+        for (let i = i0; i < i1; i++) { const th = pk.t[i] * TPI, w = pk.w[i]; r += w * Math.cos(th); q += w * Math.sin(th); sw += w; }
+        if (i1 - i0 < 12 || sw <= 0 || Math.sqrt(r * r + q * q) / sw < 0.12) continue;
+        let d = Math.atan2(q, r) / TPI - (((Ag % half) + half) % half);
+        d -= Math.round(d / half) * half;
+        pts.push({ t: (Math.min(duration, c0 + CH) + c0) / 2, d: d });
+      }
+      return pts;
+    };
+    const fitLine = function (pts) {
+      let st = 0, sd = 0, stt = 0, std = 0;
+      pts.forEach(function (q) { st += q.t; sd += q.d; stt += q.t * q.t; std += q.t * q.d; });
+      const n = pts.length, den = n * stt - st * st;
+      return den ? (n * std - st * sd) / den : 0;
+    };
+    const spreadMs = function (pts, slope) {
+      let lo = Infinity, hi = -Infinity;
+      pts.forEach(function (q) { const r = q.d - slope * q.t; lo = Math.min(lo, r); hi = Math.max(hi, r); });
+      return (hi - lo) * 1000;
+    };
+    {
+      let pts = localPhases(P, A);
+      if (pts.length >= 5) {
+        drift.chunks = pts.length;
+        drift.beforeMs = spreadMs(pts, 0);
+        let total = 0;
+        for (let it = 0; it < 3; it++) {
+          pts = localPhases(P, A);
+          if (pts.length < 5) break;
+          const slope = fitLine(pts);
+          if (Math.abs(slope) > 6e-4 || Math.abs(slope) < 1e-6) break;
+          const gain = spreadMs(pts, 0) - spreadMs(pts, slope);
+          if (it === 0 && (gain < 3 || !DRIFT_FIX)) break;       // phases are flat enough: leave the period alone
+          P *= (1 + slope); total += slope;
+        }
+        if (total) { A = centreGrid(kt2, kw2, P, A); drift.slopePpm = Math.round(total * 1e6); }
+        drift.afterMs = spreadMs(localPhases(P, A), 0);
+      }
+    }
     const bpm = 60 / P;
 
     // Beat lattice t_k = A + k*P for k = 0..K-1 (covers the whole song).
@@ -374,7 +579,7 @@
       onsetRate: onsetRate, onsetTimes: Float32Array.from(peaks2), onset2: onset2,
       inst: inst.events, instEnv: inst.env, study: study,
       detectedBpm: detectedBpm, tempoOctave: tempo.bpm / detectedBpm,
-      sections: sections
+      sections: sections, drift: drift
     };
   }
 
@@ -584,6 +789,7 @@
   }
 
   ns.analyzeAudio = analyzeAudio;
+  ns.__tempoDebug = { foldScore: foldScore, refineTempo: refineTempo, foldPhase: foldPhase };
   ns.onsetAt = onsetAt;
   ns.instAt = instAt;
   ns.dominantInst = dominantInst;

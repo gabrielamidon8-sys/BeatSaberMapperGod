@@ -174,7 +174,7 @@
         songFilename: o.songFile || 'song.ogg',
         songDuration: Math.round((o.duration || 0) * 1000) / 1000,
         audioDataFilename: 'AudioData.dat',
-        bpm: Math.round(o.bpm * 100) / 100,
+        bpm: Math.round(o.bpm * 100000) / 100000,
         lufs: 0.0,
         previewStartTime: o.previewStart || 12,
         previewDuration: o.previewDuration || 12

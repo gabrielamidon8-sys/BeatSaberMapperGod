@@ -129,7 +129,7 @@
       _songSubName: '',
       _songAuthorName: o.artist || 'Unknown artist',
       _levelAuthorName: o.mapper || 'BSM Generative Mapper',
-      _beatsPerMinute: round2(o.bpm),
+      _beatsPerMinute: Math.round(o.bpm * 100000) / 100000,   // keep the decimals: 0.01 BPM is already 12 ms of drift in 3 minutes
       _shuffle: 0,
       _shufflePeriod: 0.5,
       _previewStartTime: o.previewStart || 12,

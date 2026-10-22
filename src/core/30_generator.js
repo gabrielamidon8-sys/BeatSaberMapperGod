@@ -299,36 +299,58 @@
       if (k >= 0 && k < K && Math.abs(q - Math.round(q)) < 0.25) onQ[k]++;
     }
 
+    // 1/8-beat grid onsets: only these justify a gatling burst (8 hits per beat)
+    const onE = new Array(K).fill(0);
+    if (an.onsetTimes) for (let i = 0; i < an.onsetTimes.length; i++) {
+      const f = (an.onsetTimes[i] - A) / P, k = Math.floor(f);
+      const q = (f - k) * 8;
+      if (k >= 0 && k < K && Math.abs(q - Math.round(q)) < 0.3) onE[k]++;
+    }
+
     // which beats are streams
     const stream = new Array(K).fill(false);
     const maxStream = cfg.speed ? 15 : MAX_STREAM_NPS;
-    const streamPer = cfg.speed && 4 / P < 7.5 ? 8 : 4;       // slow songs get 1/8-note bursts in speedcore
-    if (cfg.stream > 0 && streamPer / P <= maxStream) {
+    const spBase = cfg.speed && 4 / P < 7.5 ? 8 : 4;       // slow songs get 1/8-note bursts in speedcore
+    const sp = new Array(K).fill(spBase);
+    const hard = cfg.difficulty === 'Expert' || cfg.difficulty === 'ExpertPlus';
+    const follow = hard ? cfg.follow : (cfg.difficulty === 'Hard' ? cfg.follow * 0.5 : 0);
+    const dense = new Array(K).fill(false);                // machine-gun beats: the music itself hits every quarter
+    if (follow > 0) {
+      for (let k = 0; k < K; k++) {
+        if (onQ[k] >= 3 && an.beatEnergy[k] >= 0.15 && 4 / P <= 16) dense[k] = true;
+        if (onE[k] >= 6 && onQ[k] >= 3 && an.beatEnergy[k] >= 0.15 && 8 / P <= maxStream) sp[k] = 8;
+      }
+    }
+    const streamOK = (cfg.stream > 0 && spBase / P <= maxStream) || follow > 0;
+    if (streamOK) {
       let inRun = false;
       for (let k = 0; k < K; k++) {
         const e = an.beatEnergy[k];
-        if (e < 0.3) { inRun = false; continue; }
+        if (e < 0.3 && !(dense[k] && e >= 0.15)) { inRun = false; continue; }
         const n = Math.min(4, onQ[k]);
-        let p = pri.streamP(cfg.difficulty, n);
-        if (p === null) p = STREAM_DEFAULT[n];
+        let p = cfg.stream > 0 ? (pri.streamP(cfg.difficulty, n) === null ? STREAM_DEFAULT[n] : pri.streamP(cfg.difficulty, n)) : 0;
         // a learned stream habit cannot override the music: sparse beats rarely become streams
         if (n <= 1) p = Math.min(p, 0.08); else if (n === 2) p = Math.min(p, 0.4);
         p *= cfg.stream;
         if (cfg.speed && an.beatEnergy[k] >= 0.25) p = Math.max(p, n >= 2 ? 0.92 : 0.7);
         if (inRun && n >= 2) p = Math.min(1, p + 0.3);
+        if (dense[k]) p = Math.max(p, Math.min(0.97, 0.55 + 0.45 * follow));
+        if (!dense[k] && spBase / P > maxStream) p = 0;
         stream[k] = rng() < Math.min(1, p);
         inRun = stream[k];
       }
-      for (let k = 0; k < K; k++) {          // one lone stream beat is just four notes: not a stream
-        if (stream[k] && !(k > 0 && stream[k - 1]) && !(k + 1 < K && stream[k + 1])) stream[k] = false;
+      for (let k = 0; k < K; k++) {          // one lone stream beat is just four notes: not a stream (a lone machine-gun beat is kept)
+        if (stream[k] && !dense[k] && !(k > 0 && stream[k - 1]) && !(k + 1 < K && stream[k + 1])) stream[k] = false;
       }
-      // never let streams alone overshoot the target; drop the least musical stream beats first
+      // never let streams alone overshoot the target; drop the least musical stream beats first (machine-gun beats last)
       let S = 0;
       const sb = [];
-      for (let k = 0; k < K; k++) if (stream[k]) { S += streamPer; sb.push(k); }
-      if (S > 1.1 * hitTotal) {
-        sb.sort(function (a, b) { return (onPer[a] + an.beatEnergy[a]) - (onPer[b] + an.beatEnergy[b]); });
-        for (const k of sb) { if (S <= 1.1 * hitTotal) break; stream[k] = false; S -= streamPer; }
+      for (let k = 0; k < K; k++) if (stream[k]) { S += sp[k]; sb.push(k); }
+      const keepScore = function (k) { return onPer[k] + an.beatEnergy[k] + (dense[k] ? 20 : 0); };
+      const limit = function () { return 1.1 * hitTotal + (follow > 0 ? 0.9 * hitTotal * Math.min(1, follow) : 0); };
+      if (S > limit()) {
+        sb.sort(function (a, b) { return keepScore(a) - keepScore(b); });
+        for (const k of sb) { if (S <= limit()) break; stream[k] = false; S -= sp[k]; }
       }
     }
     // A beat holds about as many hits as the music has onsets in it (real maps do this), never many more.
@@ -337,9 +359,11 @@
     let S = 0, R = 0;
     for (let k = 0; k < K; k++) {
       if (targets.perBeat[k] <= 0) continue;
-      if (stream[k]) S += streamPer; else R += Math.min(targets.perBeat[k] / (1 + cfg.chord), capOf(k));
+      if (stream[k]) S += sp[k]; else R += Math.min(targets.perBeat[k] / (1 + cfg.chord), capOf(k));
     }
-    const scale = R > 0 ? ns.clamp((hitTotal - S) / R, 0.2, 1.8) : 1;
+    let Sd = 0;                                   // machine-gun beats are extra: they do not eat the rest of the map
+    for (let k = 0; k < K; k++) if (stream[k] && dense[k]) Sd += sp[k];
+    const scale = R > 0 ? ns.clamp((hitTotal + Math.min(1, follow) * Sd - S) / R, 0.2, 1.8) : 1;
 
     const hits = [];
     const accepted = [];
@@ -349,7 +373,7 @@
       const isDown = (((k - an.downbeat) % 4) + 4) % 4 === 0;
       if (e < 0.04 || targets.perBeat[k] <= 0) continue;
       if (stream[k]) {
-        for (const s of (streamPer === 8 ? [0, 3, 6, 9, 12, 15, 18, 21] : [0, 6, 12, 18])) {
+        for (const s of (sp[k] === 8 ? [0, 3, 6, 9, 12, 15, 18, 21] : [0, 6, 12, 18])) {
           const bs = (A + (k + s / SLOTS) * P) / P;
           const strength = ns.onsetAt(an, A + (k + s / SLOTS) * P, 0.025);
           hits.push({ k: k, s: s, bs: bs, strength: strength, e: e, down: isDown && s === 0, stream: true, first: s === 0 && !stream[k - 1] });
@@ -397,6 +421,33 @@
       }
     }
     hits.sort(function (a, b) { return a.bs - b.bs; });
+    // Hit following: a clear onset on the beat or half beat gets its own note on Hard+ (the mapper must not skip
+    // what the music plainly hits), as long as the swing speed stays playable.
+    if (follow > 0) {
+      const thr = hard ? 0.5 / Math.max(0.6, Math.min(1.4, follow)) : 0.7;
+      const add = [];
+      let lo = 0;
+      for (let k = 0; k < K; k++) {
+        if (an.beatEnergy[k] < 0.0005 && onPer[k] === 0) continue;
+        for (const s of (hard ? [0, 12, 6, 18] : [0, 12])) {
+          const bs = (A + (k + s / SLOTS) * P) / P;
+          if (ns.onsetAt(an, A + (k + s / SLOTS) * P, 0.025) < thr + (s % 12 ? 0.12 : 0)) continue;
+          while (lo < hits.length && hits[lo].bs < bs - 1.2) lo++;
+          let ok = true, local = 0;
+          for (let j = lo; j < hits.length && hits[j].bs <= bs + 1.2; j++) {
+            if (Math.abs(hits[j].bs - bs) < cfg.minGap - 1e-6) { ok = false; break; }
+          }
+          if (!ok) continue;
+          for (const a of add) if (Math.abs(a.bs - bs) < cfg.minGap - 1e-6) { ok = false; break; }
+          if (!ok) continue;
+          for (let j = lo; j < hits.length && hits[j].bs <= bs + 1.0 / P * 0.5; j++) if (hits[j].bs >= bs - 0.5 / P) local++;
+          for (const a of add) if (Math.abs(a.bs - bs) <= 0.5 / P) local++;
+          if (local >= 7) continue;           // already about 14 notes a second here
+          add.push({ k: k, s: s, bs: bs, strength: ns.onsetAt(an, A + (k + s / SLOTS) * P, 0.025), e: an.beatEnergy[k], down: s === 0 && (((k - an.downbeat) % 4) + 4) % 4 === 0, stream: false });
+        }
+      }
+      if (add.length) { for (const a of add) hits.push(a); hits.sort(function (a, b) { return a.bs - b.bs; }); }
+    }
     if (an.instEnv) {
       for (const h of hits) {
         const r = ns.instAt(an, h.bs * P, 0.03);
@@ -916,7 +967,8 @@
       flow: style === 'flow' ? 1.6 : 1,
       lightMood: options.lightMood === undefined ? 1 : options.lightMood,
       instruments: options.instruments === undefined ? 1 : options.instruments,
-      repeat: options.repeat === undefined ? 1 : options.repeat
+      repeat: options.repeat === undefined ? 1 : options.repeat,
+      follow: (options.follow === undefined ? 1 : options.follow) * (style === 'minimal' ? 0.3 : 1)
     };
     if (style === 'chaos') cfg.chaos = Math.max(cfg.chaos, 0.45);
     if (style === 'minimal') { cfg.walls *= 0.4; cfg.bombs *= 0.5; }
