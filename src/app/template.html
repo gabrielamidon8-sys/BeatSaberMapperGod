@@ -273,6 +273,14 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
             <option value="0.5">Half (/2)</option>
           </select>
         </label>
+        <label>
+          <span class="lbl">Instrument following <output id="oInst"></output></span>
+          <input type="range" id="instruments" min="0" max="150" value="100" step="5">
+        </label>
+        <label>
+          <span class="lbl">Repeat patterns <output id="oRepeat"></output></span>
+          <input type="range" id="repeat" min="0" max="150" value="100" step="5">
+        </label>
         <label class="check"><input type="checkbox" id="lights" checked>Lighting events</label>
         <label>
           <span class="lbl">Seed</span>
@@ -331,6 +339,10 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       <span><i style="background:var(--blue)"></i>Blue saber</span>
       <span><i style="background:#8f6fe8"></i>Wall</span>
       <span><i style="background:#c9ced9"></i>Bomb</span>
+      <span><i style="background:#f0a030"></i>Kick</span>
+      <span><i style="background:#5fd18a"></i>Snare</span>
+      <span><i style="background:#4cc9f0"></i>Hat</span>
+      <span><i style="background:#e060d0"></i>Lead</span>
       <span><i style="background:#e0a017"></i>Playhead</span>
     </div>
     <div class="status" id="status" role="status" hidden></div>
@@ -476,7 +488,9 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       '<div><dt>Tempo</dt><dd>' + an.bpm.toFixed(2) + ' BPM</dd></div>' +
       '<div><dt>Length</dt><dd>' + fmtTime(an.duration) + '</dd></div>' +
       '<div><dt>Beat lock</dt><dd>' + Math.round(an.tempoConfidence * 100) + '%</dd></div>' +
-      '<div><dt>Sections</dt><dd>' + an.sections.length + '</dd></div>';
+      '<div><dt>Sections</dt><dd>' + an.sections.length + '</dd></div>' +
+      '<div><dt>Instruments sensed</dt><dd>' + an.inst.kick.length + ' kick, ' + an.inst.snare.length + ' snare, ' + an.inst.hat.length + ' hat, ' + an.inst.lead.length + ' lead</dd></div>' +
+      '<div><dt>Repeated bars</dt><dd>' + Math.round(an.study.linkedShare * 100) + '% of ' + an.study.bars + '</dd></div>';
   }
 
   /* ---------- the brain ---------- */
@@ -484,7 +498,10 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
   function loadBrain() {
     try {
       var raw = window.localStorage.getItem(STORE_KEY);
-      if (raw) return BSM.normalizeBrain(JSON.parse(raw));
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o && o.dspv === 2) return BSM.normalizeBrain(o);   // older brains were learned with a coarser onset detector
+      }
     } catch (e) { /* storage blocked or corrupt: fall back to the built-in brain */ }
     return cloneDefault();
   }
@@ -495,7 +512,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     var s = BSM.summarizeBrain(S.brain);
     $('brainSummary').textContent =
       s.maps + ' map' + (s.maps === 1 ? '' : 's') + ' learned, ' + s.notes + ' notes, ' +
-      s.swingTransitions + ' swing transitions, ' + s.walls + ' walls, ' + s.artWalls + ' wall-art pieces, ' + s.lightBars + ' light-show bars' +
+      s.swingTransitions + ' swing transitions, ' + s.walls + ' walls, ' + s.artWalls + ' wall-art pieces, ' + s.lightBars + ' light-show bars, ' + (s.repeatShare !== undefined ? Math.round(s.repeatShare * 100) + '% of notes repeat earlier bars' : '') +
       (s.beatsWithAudio ? ', ' + s.withAudio + ' with audio' : '') + '.';
   }
 
@@ -531,6 +548,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
       walls: num('walls') / 100,
       bombs: num('bombs') / 100,
       art: num('art') / 100,
+      instruments: num('instruments') / 100,
+      repeat: num('repeat') / 100,
       streams: num('streams') / 100,
       lights: $('lights').checked,
       candidates: parseInt($('candidates').value, 10)
@@ -654,6 +673,7 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
     return file.text().then(function (txt) {
       var obj = JSON.parse(txt);
       if (!obj || obj.format !== 'bsm-brain') throw new Error('That file is not a BeatForge brain.');
+      if (obj.dspv !== 2) throw new Error('That brain was saved by an older version (coarser song analysis). Learn your maps again instead.');
       S.brain = BSM.normalizeBrain(obj);
       saveBrain();
       updateBrainSummary();
@@ -939,6 +959,15 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
         ctx.fillRect(i, mid - h, 1, h * 2);
       }
     }
+    if (an.inst) {
+      var ROWS = [['kick', '#f0a030'], ['snare', '#5fd18a'], ['hat', '#4cc9f0'], ['lead', '#e060d0']];
+      ROWS.forEach(function (r, i) {
+        ctx.fillStyle = r[1];
+        ctx.globalAlpha = 0.75;
+        an.inst[r[0]].forEach(function (ev) { ctx.fillRect(x(ev.t), 14 + i * 5, 1, 3); });
+        ctx.globalAlpha = 1;
+      });
+    }
     var entry = S.maps[S.preview];
     if (entry) {
       var m = entry.map, P = an.period;
@@ -1055,6 +1084,8 @@ td button { appearance: none; border: 1px solid var(--line); background: var(--p
      ['chaos', 'oChaos', function (v) { return v + '%'; }],
      ['walls', 'oWalls', function (v) { return v + '%'; }],
      ['bombs', 'oBombs', function (v) { return v + '%'; }],
+     ['instruments', 'oInst', function (v) { return v + '%'; }],
+     ['repeat', 'oRepeat', function (v) { return v + '%'; }],
      ['art', 'oArt', function (v) { return v + '%'; }],
      ['streams', 'oStreams', function (v) { return v + '%'; }]].forEach(function (c) {
       var inp = $(c[0]);

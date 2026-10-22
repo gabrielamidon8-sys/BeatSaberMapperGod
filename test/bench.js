@@ -17,7 +17,7 @@ const songs = [
 
 const loadBrain = f => BSM.normalizeBrain(JSON.parse(fs.readFileSync(f, 'utf8')));
 
-const keys = ['notes', 'nps', 'chordPct', 'dotPct', 'parityBreakPct', 'sameDirPct', 'sameCellPct', 'dirEntropy', 'onOnsetPct', 'energyCorr', 'walls', 'artWalls', 'bombs'];
+const keys = ['notes', 'nps', 'chordPct', 'dotPct', 'parityBreakPct', 'sameDirPct', 'sameCellPct', 'dirEntropy', 'onOnsetPct', 'energyCorr', 'repeatExactPct', 'walls', 'artWalls', 'bombs'];
 const rows = [];
 for (const s of songs) {
   const an = BSM.analyzeAudio(pcm(s.pcm), 44100);

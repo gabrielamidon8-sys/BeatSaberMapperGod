@@ -197,6 +197,13 @@
     const fluxBass = new Float32Array(frames);
     const fluxHigh = new Float32Array(frames);
     const rms = new Float32Array(frames);
+    // instrument sensing: flux per spectral region, plus where the mid-range energy sits (a pitch proxy)
+    const GR = [[30, 150], [150, 500], [500, 3000], [3000, 8000], [8000, 16000]].map(function (g) {
+      return [Math.max(1, Math.round(g[0] / binHz)), Math.min(nb - 1, Math.round(g[1] / binHz))];
+    });
+    const gflux = GR.map(function () { return new Float32Array(frames); });
+    const midCent = new Float32Array(frames);
+    const lo3 = Math.max(1, Math.round(500 / binHz)), hi3 = Math.min(nb - 1, Math.round(3000 / binHz));
     const bands = new Float32Array(frames * NBANDS);
     const re = new Float64Array(N), im = new Float64Array(N);
     let prev = new Float64Array(nb), cur = new Float64Array(nb);
@@ -231,6 +238,16 @@
           }
         }
         flux[f] = fa; fluxBass[f] = fb; fluxHigh[f] = fh;
+        for (let g = 0; g < GR.length; g++) {
+          let gs = 0;
+          for (let k = GR[g][0]; k <= GR[g][1]; k++) { const d = cur[k] - prev[k]; if (d > 0) gs += d; }
+          gflux[g][f] = gs;
+        }
+      }
+      {
+        let wsum = 0, lsum = 0;
+        for (let k = lo3; k <= hi3; k++) { wsum += cur[k]; lsum += cur[k] * Math.log2(k * binHz / 500); }
+        midCent[f] = wsum > 0 ? ns.clamp(lsum / wsum / Math.log2(6), 0, 1) : 0.5;
       }
       const tmp = prev; prev = cur; cur = tmp;
     }
@@ -239,6 +256,14 @@
     const onset = scaleByPercentile(movingMeanSubtract(flux, W), 0.97);
     const bassEnv = scaleByPercentile(movingMeanSubtract(fluxBass, W), 0.97);
     const highEnv = scaleByPercentile(movingMeanSubtract(fluxHigh, W), 0.97);
+
+    const gEnv = gflux.map(function (g) { return scaleByPercentile(movingMeanSubtract(g, W), 0.97); });
+    const inst = senseInstruments(gEnv, midCent, fps, frames);
+    // a more sensitive onset curve: any instrument's attack counts
+    const onset2 = new Float32Array(frames);
+    for (let f = 0; f < frames; f++) {
+      onset2[f] = Math.max(onset[f], 0.95 * inst.env.kick[f], 0.9 * inst.env.snare[f], 0.75 * inst.env.hat[f], 0.9 * inst.env.lead[f]);
+    }
 
     // Tempo and a regular grid (regression on the tracked beats, outliers removed once).
     const tempo = estimateTempo(onset, fps);
@@ -322,6 +347,8 @@
 
     // Sections from beat-synchronous spectral novelty.
     const sections = detectSections(beatBands, beatEnergy, K, NBANDS, downbeat);
+    const peaks2 = onsetPeaks(onset2, fps);
+    const study = studyBars(inst, A, P, downbeat, K, sections);
 
     return {
       sr: sr, hop: hop, fps: fps, duration: duration,
@@ -330,10 +357,113 @@
       beatEnergy: beatEnergy, beatBass: beatBass, beatHigh: beatHigh, beatOnset: beatOnset,
       downbeat: downbeat,
       onset: onset, frames: frames,
-      onsetRate: onsetRate, onsetTimes: Float32Array.from(peaks),
+      onsetRate: onsetRate, onsetTimes: Float32Array.from(peaks2), onset2: onset2,
+      inst: inst.events, instEnv: inst.env, study: study,
       detectedBpm: detectedBpm, tempoOctave: tempo.bpm / detectedBpm,
       sections: sections
     };
+  }
+
+  /* Instrument sensing. Each spectral region's attack curve is peak-picked into events:
+   *   kick   low band attacks (30-150 Hz)
+   *   snare  attacks that are loud in both the low-mid body and the high noise, not just the low end (snare, clap)
+   *   hat    attacks in the air band (3-16 kHz) with no body
+   *   lead   mid-range attacks (500-3000 Hz): synths, vocals, guitars; carries a pitch proxy 0..1
+   * Events are {t, s (strength 0..1), p (pitch proxy, lead only)}. */
+  function senseInstruments(gEnv, midCent, fps, frames) {
+    const low = gEnv[0], lowmid = gEnv[1], mid = gEnv[2], hi = gEnv[3], air = gEnv[4];
+    const env = { kick: new Float32Array(frames), snare: new Float32Array(frames), hat: new Float32Array(frames), lead: new Float32Array(frames) };
+    for (let f = 0; f < frames; f++) {
+      env.kick[f] = Math.max(0, low[f] - 0.3 * Math.max(mid[f], hi[f]));
+      env.snare[f] = Math.sqrt(Math.max(0, lowmid[f]) * Math.max(0, Math.max(hi[f], air[f]))) * (1 - 0.5 * Math.min(1, low[f]));
+      env.hat[f] = Math.max(0, Math.max(hi[f], air[f]) - 0.6 * Math.max(lowmid[f], low[f]));
+      env.lead[f] = Math.max(0, mid[f] - 0.4 * Math.max(env.snare[f], low[f]));
+    }
+    const sep = { kick: 0.14, snare: 0.12, hat: 0.07, lead: 0.07 }, thr = { kick: 0.5, snare: 0.42, hat: 0.45, lead: 0.45 };
+    const events = {};
+    for (const name of ['kick', 'snare', 'hat', 'lead']) {
+      const e = env[name], minSep = Math.max(1, Math.round(sep[name] * fps)), out = [];
+      let last = -1e9;
+      for (let i = 1; i < frames - 1; i++) {
+        if (e[i] > thr[name] && e[i] >= e[i - 1] && e[i] > e[i + 1] && i - last >= minSep) {
+          const ev = { t: i / fps, s: Math.min(1, e[i]) };
+          if (name === 'lead') ev.p = midCent[Math.min(frames - 1, i + 2)];
+          out.push(ev); last = i;
+        }
+      }
+      events[name] = out;
+    }
+    return { events: events, env: env };
+  }
+
+  // Strongest attack of each instrument within +/- win seconds of t, plus the lead's pitch proxy.
+  function instAt(an, t, win) {
+    const r = { kick: 0, snare: 0, hat: 0, lead: 0, pitch: 0.5 };
+    const fps = an.fps, c = Math.round(t * fps), w = Math.max(1, Math.round(win * fps));
+    const lo = Math.max(0, c - w), hi = Math.min(an.frames - 1, c + w);
+    for (const name of ['kick', 'snare', 'hat', 'lead']) {
+      const e = an.instEnv[name];
+      let m = 0;
+      for (let f = lo; f <= hi; f++) if (e[f] > m) m = e[f];
+      r[name] = m > 1 ? 1 : m;
+    }
+    if (r.lead > 0.3) {
+      let bestD = 1e9;
+      for (const ev of an.inst.lead) { const d = Math.abs(ev.t - t); if (d < bestD) { bestD = d; r.pitch = ev.p; } if (ev.t > t + 1) break; }
+    }
+    return r;
+  }
+  // Name of the instrument driving an attack at t ('' when nothing clear).
+  function dominantInst(r) {
+    let best = '', v = 0.3;
+    const wgt = { kick: 1.0, snare: 1.0, lead: 0.9, hat: 0.7 };
+    for (const name of ['kick', 'snare', 'lead', 'hat']) if (r[name] * wgt[name] > v) { v = r[name] * wgt[name]; best = name; }
+    return best;
+  }
+
+  /* Song study at bar level. Every bar becomes a 16-slot x 4-instrument attack signature; bars that sound alike
+   * (cosine similarity) are linked to their earliest similar bar, so the generator can repeat choreography where
+   * the music repeats. Also reports the texture of each section (what plays how often). */
+  function studyBars(inst, A, P, downbeat, K, sections) {
+    const names = ['kick', 'snare', 'hat', 'lead'];
+    const firstBeat = ((downbeat % 4) + 4) % 4;
+    const nBars = Math.max(0, Math.floor((K - firstBeat) / 4));
+    const sig = [];
+    for (let j = 0; j < nBars; j++) sig.push(new Float32Array(64));
+    names.forEach(function (name, ni) {
+      for (const ev of inst.events[name]) {
+        const q = (ev.t - A) / P - firstBeat;              // beats since the first bar start
+        if (q < 0) continue;
+        const j = Math.floor(q / 4);
+        if (j >= nBars) continue;
+        const slot = Math.min(15, Math.max(0, Math.round((q - 4 * j) * 4)));
+        sig[j][ni * 16 + slot] = Math.max(sig[j][ni * 16 + slot], ev.s);
+      }
+    });
+    const norm = sig.map(function (v) { let t = 0; for (let i = 0; i < 64; i++) t += v[i] * v[i]; return Math.sqrt(t); });
+    const partner = new Int32Array(nBars).fill(-1), sim = new Float32Array(nBars);
+    for (let j = 1; j < nBars; j++) {
+      if (norm[j] < 0.5) continue;
+      let best = -1, bs = 0.82;
+      for (let i = 0; i < j; i++) {
+        if (norm[i] < 0.5) continue;
+        let d = 0; for (let x = 0; x < 64; x++) d += sig[j][x] * sig[i][x];
+        const c = d / (norm[i] * norm[j]);
+        if (c > bs + 1e-9 || (best < 0 && c >= bs)) { bs = c; best = i; }
+      }
+      if (best >= 0) { partner[j] = best; sim[j] = bs; }
+    }
+    const texture = sections.map(function (sec) {
+      const rate = {};
+      const t0 = A + sec.start * P, t1 = A + sec.end * P;
+      for (const name of names) {
+        let c = 0; for (const ev of inst.events[name]) if (ev.t >= t0 && ev.t < t1) c++;
+        rate[name] = +(c / Math.max(1, sec.end - sec.start)).toFixed(2);   // events per beat
+      }
+      return rate;
+    });
+    let linked = 0; for (let j = 0; j < nBars; j++) if (partner[j] >= 0) linked++;
+    return { firstBeat: firstBeat, bars: nBars, partner: partner, sim: sim, texture: texture, linkedShare: nBars ? linked / nBars : 0 };
   }
 
   function detectSections(beatBands, beatEnergy, K, NB, downbeat) {
@@ -410,7 +540,7 @@
 
   // Max onset strength within +/- win seconds of time t (0..1).
   function onsetAt(analysis, t, win) {
-    const fps = analysis.fps, env = analysis.onset;
+    const fps = analysis.fps, env = analysis.onset2 || analysis.onset;
     const c = Math.round(t * fps), w = Math.max(1, Math.round(win * fps));
     let m = 0;
     for (let f = Math.max(0, c - w); f <= Math.min(env.length - 1, c + w); f++) if (env[f] > m) m = env[f];
@@ -441,6 +571,8 @@
 
   ns.analyzeAudio = analyzeAudio;
   ns.onsetAt = onsetAt;
+  ns.instAt = instAt;
+  ns.dominantInst = dominantInst;
   ns.beatIndexAt = beatIndexAt;
   ns.timeToBeat = timeToBeat;
   ns.waveformPeaks = waveformPeaks;

@@ -394,6 +394,14 @@
       }
     }
     hits.sort(function (a, b) { return a.bs - b.bs; });
+    if (an.instEnv) {
+      for (const h of hits) {
+        const r = ns.instAt(an, h.bs * P, 0.03);
+        h.inst = ns.dominantInst(r);
+        h.pitch = r.pitch;
+        h.leadS = r.lead;
+      }
+    }
     return hits;
   }
 
@@ -421,7 +429,56 @@
     const dotBonus = Math.log(cfg.dot + 0.001) + 1.2;
     const flow = cfg.flow || 1;
 
-    const chooseCell = function (hand, bs, e, mode) {
+    // ----- instruments: what the attack under a hit suggests for the note -----
+    const instW = cfg.instruments === undefined ? 1 : cfg.instruments;
+    const instNudge = function (hit, lane, layer, dir, d) {
+      if (!hit.inst || instW <= 0) return 0;
+      let v = 0;
+      const learned = pri.instBias(hit.inst, dir < 8 ? dir : -1, layer, lane);
+      if (learned !== null) v += 0.9 * learned;
+      else if (hit.inst === 'kick') { if (dir === 1 || dir === 6 || dir === 7) v += 0.5; if (layer === 0) v += 0.25; }
+      else if (hit.inst === 'snare') { if (dir === 0 || dir === 4 || dir === 5) v += 0.35; }
+      if (hit.inst === 'lead') {
+        const third = Math.min(2, Math.floor(hit.pitch * 3));
+        const pl = pri.pitchLaneP(third, lane);
+        if (pl !== null) v += 0.9 * Math.log(pl / 0.25);
+        else v -= 0.45 * Math.abs(lane - Math.round(hit.pitch * 3));      // higher notes sit to the right
+      } else if (hit.inst === 'hat') v -= 0.3 * d;                         // hats are small, quick movements
+      return instW * v;
+    };
+
+    // ----- repeated music -> repeated choreography -----
+    const st = an.study;
+    const repW = cfg.repeat === undefined ? 1 : cfg.repeat;
+    const rp = pri.repeat;
+    const repStrength = repW * (rp.total >= 100 ? ns.clamp((rp.exact / rp.total) / 0.3, 0.3, 1.6) : 1);
+    const barNotes = new Map();
+    const slotInfo = function (bs) {
+      if (!st) return null;
+      const q = (bs * P - an.phase) / P - st.firstBeat;
+      if (q < 0) return null;
+      const j = Math.floor(q / 4 + 1e-6);
+      if (j >= st.bars) return null;
+      return { j: j, key: Math.round((q - 4 * j) * 12) };
+    };
+    const template = function (bs, hand) {
+      const si = slotInfo(bs);
+      if (!si) return null;
+      const pj = st.partner[si.j];
+      if (pj < 0) return null;
+      const m = barNotes.get(pj);
+      return m ? (m.get(si.key + '|' + hand) || null) : null;
+    };
+    const repeatNudge = function (hit, hand, lane, layer, dir) {
+      if (repStrength <= 0) return 0;
+      const tpl = template(hit.bs, hand);
+      if (!tpl) return 0;
+      let v = 0;
+      if (tpl.lane === lane && tpl.layer === layer) v += 1.4;
+      if (tpl.dir === dir) v += 1.2;
+      return repStrength * v;
+    };
+    const chooseCell = function (hand, bs, e, mode, hit) {
       const H = hands[hand], O = hands[1 - hand];
       const dt = bs - H.beat;
       const reach = ns.allowedReach(dt, P);
@@ -445,6 +502,7 @@
             }
             sc += paritySc(H, dir, dt, layer);
             sc += modeBonus(mode, H, lane, layer, dir, d, e, rng);
+            if (hit) sc += instNudge(hit, lane, layer, dir, d) + repeatNudge(hit, hand, lane, layer, dir);
             sc += cfg.chaos * 3 * rng.gumbel();
             if (sc > bestSc) { bestSc = sc; best = { lane: lane, layer: layer, dir: dir, reachOk: d <= reach }; }
           }
@@ -455,6 +513,11 @@
 
     const place = function (hand, bs, c) {
       notes.push({ time: bs, lane: c.lane, layer: c.layer, color: hand, dir: c.dir });
+      const si = slotInfo(bs);
+      if (si) {
+        if (!barNotes.has(si.j)) barNotes.set(si.j, new Map());
+        barNotes.get(si.j).set(si.key + '|' + hand, { lane: c.lane, layer: c.layer, dir: c.dir });
+      }
       occ.add(keyOf(bs, c.lane, c.layer));
       let v = VERT[c.dir], h = HORIZ[c.dir];
       if (c.dir === 8) { v = -hands[hand].v; h = 0; }          // a dot keeps the swing going
@@ -478,9 +541,9 @@
       if (h.stream) {
         // streams alternate hands strictly
         const hand = 1 - lastHand;
-        let c = chooseCell(hand, h.bs, h.e, mode), useHand = hand;
+        let c = chooseCell(hand, h.bs, h.e, mode, h), useHand = hand;
         if (!c || !c.reachOk) {
-          const alt = chooseCell(1 - hand, h.bs, h.e, mode);
+          const alt = chooseCell(1 - hand, h.bs, h.e, mode, h);
           if (alt && alt.reachOk) { c = alt; useHand = 1 - hand; } else { skipped++; continue; }
         }
         place(useHand, h.bs, c);
@@ -489,7 +552,7 @@
       }
       const chordP = ns.clamp(cfg.chord * (0.45 + h.e) * (h.s === 0 ? 1.2 : 0.85) * (0.7 + 0.6 * h.strength), 0, 0.5);
       if (rng() < chordP) {
-        const red = chooseCell(0, h.bs, h.e, mode);
+        const red = chooseCell(0, h.bs, h.e, mode, h);
         if (!red || !red.reachOk) { skipped++; continue; }
         place(0, h.bs, red);
         let blue = null;
@@ -500,7 +563,7 @@
             mdist <= ns.allowedReach(dtB, P) && !breaksParity(hands[1], mirror.dir, dtB)) {
           blue = mirror;
         } else {
-          blue = chooseCell(1, h.bs, h.e, mode);
+          blue = chooseCell(1, h.bs, h.e, mode, h);
           if (blue && !blue.reachOk) blue = null;
         }
         if (blue) place(1, h.bs, blue); else skipped++;
@@ -508,10 +571,14 @@
         continue;
       }
       let hand = 1 - lastHand;
+      if (repStrength > 0 && rng() < 0.6 * Math.min(1, repStrength)) {
+        const t0 = template(h.bs, 0), t1 = template(h.bs, 1);
+        if (t0 && !t1) hand = 0; else if (t1 && !t0) hand = 1;
+      }
       if (rng() < cfg.samehand && h.bs - hands[lastHand].beat >= 0.5) hand = lastHand;
-      let c = chooseCell(hand, h.bs, h.e, mode), useHand = hand;
+      let c = chooseCell(hand, h.bs, h.e, mode, h), useHand = hand;
       if (!c || !c.reachOk) {
-        const alt = chooseCell(1 - hand, h.bs, h.e, mode);
+        const alt = chooseCell(1 - hand, h.bs, h.e, mode, h);
         if (alt && alt.reachOk) { c = alt; useHand = 1 - hand; }
         else { skipped++; continue; }
       }
@@ -723,7 +790,9 @@
       chaos: options.chaos === undefined ? base.chaos : options.chaos,
       density: mult(options.density),
       style: style,
-      flow: style === 'flow' ? 1.6 : 1
+      flow: style === 'flow' ? 1.6 : 1,
+      instruments: options.instruments === undefined ? 1 : options.instruments,
+      repeat: options.repeat === undefined ? 1 : options.repeat
     };
     if (style === 'chaos') cfg.chaos = Math.max(cfg.chaos, 0.45);
     if (style === 'minimal') { cfg.walls *= 0.4; cfg.bombs *= 0.5; }

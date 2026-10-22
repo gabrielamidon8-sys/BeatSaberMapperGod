@@ -56,6 +56,18 @@
       // lights
       lightCount: zeros2(5, 13),
       lightLib: { bars: [], init: [], maps: 0, tab: { f: [], x: { 1: [], 2: [], 3: [], 4: [] }, v: { 1: [], 2: [], 3: [], 4: [] } } },
+      // instruments: what the note under each kind of attack looks like (counts of direction / row / lane)
+      dspv: 2,
+      inst: {
+        kick: { n: 0, dir: zeros(9), layer: zeros(3), lane: zeros(4) },
+        snare: { n: 0, dir: zeros(9), layer: zeros(3), lane: zeros(4) },
+        hat: { n: 0, dir: zeros(9), layer: zeros(3), lane: zeros(4) },
+        lead: { n: 0, dir: zeros(9), layer: zeros(3), lane: zeros(4) },
+        none: { n: 0, dir: zeros(9), layer: zeros(3), lane: zeros(4) },
+        pitchLane: zeros2(3, 4)                                // lead pitch third (low, mid, high) -> lane
+      },
+      // repeated music, repeated choreography: notes in a bar that sounds like an earlier bar
+      rep: { total: 0, found: 0, exact: 0, sameHand: 0 },
       // legacy notes-per-second (used when a song has no usable onset rate)
       npb: { Easy: [0, 0], Normal: [0, 0], Hard: [0, 0], Expert: [0, 0], ExpertPlus: [0, 0] }
     };
@@ -205,6 +217,45 @@
       }
     }
 
+    // ----- instruments and repeated bars -----
+    if (an.instEnv && an.study) {
+      const I = brain.inst;
+      for (const n of notes) {
+        if (n.dir < 0 || n.dir > 8 || n.layer < 0 || n.layer > 2 || n.lane < 0 || n.lane > 3) continue;
+        const t = an.phase + toB(n.time) * an.period;
+        const r = ns.instAt(an, t, 0.03);
+        const name = ns.dominantInst(r) || 'none';
+        const rec = I[name];
+        rec.n++; rec.dir[n.dir]++; rec.layer[n.layer]++; rec.lane[n.lane]++;
+        if (name === 'lead') I.pitchLane[Math.min(2, Math.floor(r.pitch * 3))][n.lane]++;
+      }
+      const st = an.study, bars = new Map();
+      for (const n of notes) {
+        const q = toB(n.time) - st.firstBeat;
+        if (q < 0) continue;
+        const j = Math.floor(q / 4 + 1e-6);
+        if (j >= st.bars) continue;
+        if (!bars.has(j)) bars.set(j, new Map());
+        bars.get(j).set(Math.round((q - 4 * j) * 12) + '|' + n.color, n);
+      }
+      bars.forEach(function (m, j) {
+        const pj = st.partner[j];
+        if (pj < 0 || !bars.has(pj)) return;
+        const pm = bars.get(pj);
+        m.forEach(function (n, key) {
+          brain.rep.total++;
+          const o = pm.get(key);
+          if (o) {
+            brain.rep.found++;
+            if (o.lane === n.lane && o.layer === n.layer && o.dir === n.dir) brain.rep.exact++;
+          } else {
+            const other = pm.get(key.split('|')[0] + '|' + (1 - n.color));
+            if (other) brain.rep.sameHand++;
+          }
+        });
+      });
+    }
+
     // wall art
     if (art.length) {
       const A = brain.art;
@@ -344,7 +395,38 @@
       return v[1] >= 8 ? (v[0] + 0.1) / (v[1] + 1) : null;     // art walls per beat at this loudness
     };
 
+    // What an instrument's attack tells us about the note: log-ratio of its direction / row / lane distribution to the
+    // overall one (null until it has enough notes). Used as a gentle nudge, never an override.
+    const instBias = function (name, dir, layer, lane) {
+      const rec = b.inst && b.inst[name];
+      if (!rec || rec.n < 150) return null;
+      const dTot = sum(b.dirCount) + 9;
+      const lTot = sum(b.cellCount.map(sum)) + 12;
+      let v = 0;
+      if (dir >= 0) v += Math.log(((rec.dir[dir] + 1) / (rec.n + 9)) / ((b.dirCount[dir] + 1) / dTot));
+      if (layer >= 0) {
+        const lay = b.cellCount[layer] ? sum(b.cellCount[layer]) : 0;
+        v += Math.log(((rec.layer[layer] + 1) / (rec.n + 3)) / ((lay + 1) / lTot));
+      }
+      if (lane >= 0) {
+        let ln = 0; for (let r = 0; r < 3; r++) ln += b.cellCount[r][lane];
+        v += 0.7 * Math.log(((rec.lane[lane] + 1) / (rec.n + 4)) / ((ln + 1) / lTot));
+      }
+      return ns.clamp(v, -1.5, 1.5);
+    };
+    // probability the lead's pitch third maps to a lane (null if unlearned)
+    const pitchLaneP = function (third, lane) {
+      const row = b.inst && b.inst.pitchLane && b.inst.pitchLane[third];
+      if (!row) return null;
+      const t = sum(row);
+      return t >= 80 ? (row[lane] + 1) / (t + 4) : null;
+    };
+    const repeat = { total: b.rep.total, found: b.rep.found, exact: b.rep.exact };
+
     return {
+      instBias: instBias,
+      pitchLaneP: pitchLaneP,
+      repeat: repeat,
       markov: markov,
       moveW: moveW,
       rhythmW: rhythmW,
@@ -394,6 +476,8 @@
       lightEvents: lightEvents,
       lightBars: b.lightLib.bars.length,
       lightShows: b.lightLib.maps,
+      repeatShare: b.rep && b.rep.total ? b.rep.exact / b.rep.total : 0,
+      instNotes: b.inst ? ['kick', 'snare', 'hat', 'lead'].reduce(function (a, k) { return a + b.inst[k].n; }, 0) : 0,
       difficulties: DIFFS.filter(function (k) { return b.npo[k][0] > 0 || b.npb[k][1] > 0; })
     };
   }

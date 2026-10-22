@@ -90,6 +90,27 @@ function studyMap(BSM, map, bpm, an) {
     out.energyCorr = +(sxy / Math.sqrt(sxx * syy + 1e-9)).toFixed(3);
   }
 
+  // repeated music -> repeated choreography: share of notes (in bars that sound like an earlier bar) that copy it exactly
+  if (an && an.study) {
+    const st = an.study, bars = new Map();
+    for (const n of notes) {
+      const q = (sec(n.time) - an.phase) / an.period - st.firstBeat;
+      if (q < 0) continue;
+      const j = Math.floor(q / 4 + 1e-6);
+      if (j >= st.bars) continue;
+      if (!bars.has(j)) bars.set(j, new Map());
+      bars.get(j).set(Math.round((q - 4 * j) * 12) + '|' + n.color, n);
+    }
+    let tot = 0, ex = 0;
+    bars.forEach((m, j) => {
+      const pj = st.partner[j];
+      if (pj < 0 || !bars.has(pj)) return;
+      m.forEach((n, key) => { tot++; const o = bars.get(pj).get(key); if (o && o.lane === n.lane && o.layer === n.layer && o.dir === n.dir) ex++; });
+    });
+    out.repeatExactPct = +(100 * ex / Math.max(1, tot)).toFixed(1);
+    out.repeatNotes = tot;
+  }
+
   // walls and bombs
   const art = map.walls.filter(w => BSM.isArtWall(w)).length;
   out.walls = map.walls.length - art;
